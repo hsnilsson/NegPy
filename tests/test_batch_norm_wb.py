@@ -29,6 +29,8 @@ class _FakePreviewService:
         positive_source=False,
         highlight_mode=0,
         bake_camera_wb=False,
+        lens_from_metadata=False,
+        lens_flatfield=None,
     ):
         self.calls[file_hash] = use_camera_wb
         raw = np.full((8, 8, 3), 0.5, dtype=np.float32)
