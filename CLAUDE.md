@@ -64,6 +64,10 @@ Every feature lives in `negpy/features/<name>/`:
 
 One exception: `features/altprocess/` holds only `models.py`. Lith and cyanotype are mutually exclusive, so they share the Alternative Processes panel and one `AltProcessConfig`; their logic and shaders stay in `features/lith/` and `features/cyanotype/`.
 
+`features/lens/warps.py` holds frozen lens models with `has_distortion`, `has_ca`, and
+`remap(...)`, as defined by `LensWarp` in `models.py`. `logic.py` applies their maps in
+row blocks. File readers are registered in `infrastructure/loaders/lens_metadata.py`.
+
 ### Desktop (MVC)
 
 - `AppState` (`negpy/desktop/session.py`) — mutable session state
