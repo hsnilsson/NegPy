@@ -82,12 +82,26 @@ class LocalAssetStore(IAssetStore):
                 return None
         return None
 
+    def has_thumbnail_miss(self, file_hash: str) -> bool:
+        return os.path.exists(os.path.join(self.thumb_dir, f"{file_hash}.miss"))
+
+    def save_thumbnail_miss(self, file_hash: str) -> None:
+        try:
+            marker = os.path.join(self.thumb_dir, f"{file_hash}.miss")
+            with open(marker, "wb"):
+                pass
+        except Exception as e:
+            logger.error(f"Failed to save thumbnail miss {file_hash}: {e}")
+
     def save_thumbnail(self, file_hash: str, image: Image.Image) -> None:
         """Persists thumb to disk."""
         try:
             thumb_path = os.path.join(self.thumb_dir, f"{file_hash}.jpg")
             # Save as JPEG for speed and smaller file size
             image.save(thumb_path, "JPEG", quality=85)
+            miss_path = os.path.join(self.thumb_dir, f"{file_hash}.miss")
+            if os.path.exists(miss_path):
+                os.remove(miss_path)
         except Exception as e:
             logger.error(f"Failed to save thumbnail {file_hash}: {e}")
 

@@ -160,17 +160,18 @@ class _ThumbnailDelegate(QStyledItemDelegate):
 
         icon = index.data(Qt.ItemDataRole.DecorationRole)
         if icon is None or icon.isNull():
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            area = option.rect.adjusted(self._MARGIN, self._MARGIN, -self._MARGIN, -self._MARGIN)
+            selected = bool(option.state & QStyle.StateFlag.State_Selected)
+            painter.setPen(QPen(QColor(THEME.accent_primary if selected else THEME.border_color), 1))
+            painter.setBrush(QColor(THEME.bg_header))
+            painter.drawRoundedRect(area, self._RADIUS, self._RADIUS)
             if failed:
-                painter.save()
-                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-                area = option.rect.adjusted(self._MARGIN, self._MARGIN, -self._MARGIN, -self._MARGIN)
-                painter.setPen(QPen(QColor(THEME.border_color), 1))
-                painter.setBrush(QColor(20, 20, 20))
-                painter.drawRoundedRect(area, self._RADIUS, self._RADIUS)
                 self._draw_failed_badge(painter, area)
-                if kind:
-                    self._draw_composite_badge(painter, area, kind, int(file_info.get("half") or 0))
-                painter.restore()
+            if kind:
+                self._draw_composite_badge(painter, area, kind, int(file_info.get("half") or 0))
+            painter.restore()
             return
         base = icon.pixmap(QSize(4096, 4096))  # largest available pixmap (~120px)
         if base.isNull():
@@ -747,7 +748,7 @@ class FileBrowser(QWidget):
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle("Load Roll")
         box.setText(f"Load {n} image{'s' if n != 1 else ''} from “{label}”?")
-        box.setInformativeText("They are hashed and thumbnailed on load, which takes a moment on a large roll.")
+        box.setInformativeText("They are hashed before the roll opens. Thumbnails then fill in in the background.")
         remember = QCheckBox("Always load without asking")
         box.setCheckBox(remember)
         load = box.addButton("Load", QMessageBox.ButtonRole.AcceptRole)

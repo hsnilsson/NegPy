@@ -1,66 +1,21 @@
-import asyncio
-import inspect
-from typing import Optional, Any, List, Dict, Tuple
+import os
+from typing import Optional, Any, Dict, Tuple
 from PIL import Image
 import rawpy
 from negpy.kernel.system.config import APP_CONFIG
 import numpy as np
 from negpy.kernel.image.logic import apply_exif_orientation, ensure_rgb, float_to_uint8, prepare_thumbnail, srgb_to_linear, uint8_to_float32
 from negpy.infrastructure.loaders.factory import loader_factory
-from negpy.infrastructure.loaders.helpers import embedded_preview
+from negpy.infrastructure.loaders.constants import (
+    SUPPORTED_JPEG_EXTENSIONS,
+    SUPPORTED_JXL_EXTENSIONS,
+    SUPPORTED_TIFF_EXTENSIONS,
+)
+from negpy.infrastructure.loaders.helpers import dng_quick_preview, embedded_preview
 from negpy.infrastructure.display.color_spaces import WORKING_COLOR_SPACE
 from negpy.kernel.system.logging import get_logger
 
 logger = get_logger(__name__)
-
-
-async def generate_batch_thumbnails(
-    files: List[Dict[str, str]],
-    asset_store: Any,
-    progress_callback: Optional[Any] = None,
-    ready_callback: Optional[Any] = None,
-) -> Dict[str, Image.Image]:
-    """
-    Parallel thumbnail generation with progress reporting.
-
-    ``ready_callback(key, thumb)`` fires per file so the filmstrip can fill in as the
-    batch runs, instead of waiting for the returned map.
-    """
-
-    semaphore = asyncio.Semaphore(APP_CONFIG.max_workers)
-    completed = 0
-
-    async def _worker(f_info: Dict[str, str]) -> Tuple[str, Optional[Image.Image]]:
-        nonlocal completed
-        async with semaphore:
-            thumb = await asyncio.to_thread(
-                get_thumbnail_worker,
-                f_info["path"],
-                f_info["hash"],
-                asset_store,
-                int(f_info.get("half") or 0),
-                float(f_info.get("split_x") or 0.5),
-                f_info.get("green_path") or "",
-                f_info.get("blue_path") or "",
-                tuple(f_info["crop_rect"]) if f_info.get("crop_rect") else None,
-                float(f_info.get("gutter_thickness") or 0.0),
-                str(f_info.get("process_mode") or ""),
-            )
-            completed += 1
-            if progress_callback:
-                if inspect.iscoroutinefunction(progress_callback):
-                    await progress_callback(completed, f_info["name"])
-                else:
-                    progress_callback(completed, f_info["name"])
-            key = asset_thumbnail_key(f_info)
-            if ready_callback and isinstance(thumb, Image.Image):
-                ready_callback(key, thumb)
-            return key, thumb
-
-    tasks = [_worker(f) for f in files]
-    results = await asyncio.gather(*tasks)
-
-    return {key: thumb for key, thumb in results if isinstance(thumb, Image.Image)}
 
 
 def asset_thumbnail_key(asset: Dict[str, Any]) -> str:
@@ -105,7 +60,7 @@ def _fast_demosaic(raw: Any) -> np.ndarray:
     )
 
 
-def _decode_triplet_preview(red_path: str, green_path: str, blue_path: str) -> Optional[Image.Image]:
+def _decode_triplet_preview(red_path: str, green_path: str, blue_path: str, quick_only: bool = False) -> Optional[Image.Image]:
     """Merge an RGB-scan triplet's three narrowband exposures into one preview.
 
     The red file's embedded thumbnail (and a lone decode of it) shows only the red
@@ -114,8 +69,18 @@ def _decode_triplet_preview(red_path: str, green_path: str, blue_path: str) -> O
     from negpy.features.rgbscan.logic import assemble_rgb
 
     def _decode(path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
+        if quick_only and os.path.splitext(path)[1].lower() == ".dng":
+            img = dng_quick_preview(path)
+            if img is None:
+                raise ValueError("DNG has no quick preview")
+            return np.asarray(img.convert("RGB")), {"orientation": 1}
         ctx_mgr, metadata = loader_factory.get_loader(path)
         with ctx_mgr as raw:
+            img = embedded_preview(raw, path)
+            if img is not None:
+                return np.asarray(img.convert("RGB")), metadata
+            if quick_only:
+                raise ValueError("RAW has no embedded preview")
             return _fast_demosaic(raw), metadata
 
     r, red_meta = _decode(red_path)
@@ -130,19 +95,34 @@ def _decode_triplet_preview(red_path: str, green_path: str, blue_path: str) -> O
     return img
 
 
-def decode_source_image(file_path: str, green_path: str = "", blue_path: str = "") -> Optional[Image.Image]:
+def decode_source_image(
+    file_path: str,
+    green_path: str = "",
+    blue_path: str = "",
+    *,
+    quick_only: bool = False,
+) -> Optional[Image.Image]:
     """Small EXIF-oriented preview of a source file (embedded thumb, else fast decode).
 
     An RGB-scan triplet (green_path/blue_path given) is merged from its three
     exposures so the thumbnail matches the canvas rather than showing red only."""
     if green_path and blue_path:
+        if quick_only:
+            return _decode_triplet_preview(file_path, green_path, blue_path, quick_only=True)
         return _decode_triplet_preview(file_path, green_path, blue_path)
+
+    ext = os.path.splitext(file_path)[1].lower()
+    if quick_only and ext == ".dng":
+        return dng_quick_preview(file_path)
 
     ctx_mgr, metadata = loader_factory.get_loader(file_path)
     with ctx_mgr as raw:
         img: Optional[Image.Image] = embedded_preview(raw, file_path)
 
         if img is None:
+            display_file = ext in SUPPORTED_TIFF_EXTENSIONS | SUPPORTED_JPEG_EXTENSIONS | SUPPORTED_JXL_EXTENSIONS
+            if quick_only and not display_file:
+                return None
             img = Image.fromarray(_fast_demosaic(raw))
 
         orientation = metadata.get("orientation", 1)
@@ -216,8 +196,15 @@ def get_thumbnail_worker(
                 return cached
 
         ts = APP_CONFIG.thumbnail_size
-        img = decode_source_image(file_path, green_path, blue_path)
+        has_miss = getattr(asset_store, "has_thumbnail_miss", None) if asset_store else None
+        if callable(has_miss) and has_miss(cache_key) is True:
+            return None
+
+        img = decode_source_image(file_path, green_path, blue_path, quick_only=True)
         if img is None:
+            save_miss = getattr(asset_store, "save_thumbnail_miss", None) if asset_store else None
+            if callable(save_miss):
+                save_miss(cache_key)
             return None
 
         if half:
@@ -236,6 +223,10 @@ def get_thumbnail_worker(
         return square_img
     except Exception as e:
         logger.error(f"Thumbnail Error for {file_path}: {e}")
+        if asset_store:
+            save_miss = getattr(asset_store, "save_thumbnail_miss", None)
+            if callable(save_miss):
+                save_miss(thumbnail_cache_key(file_hash, bool(green_path and blue_path)))
         return None
 
 

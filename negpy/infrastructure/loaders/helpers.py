@@ -10,7 +10,7 @@ from PIL import Image, ImageCms
 from negpy.domain.models import ColorSpace
 from negpy.features.process.models import DemosaicMode
 from negpy.infrastructure.loaders.constants import SUPPORTED_RAW_EXTENSIONS
-from negpy.kernel.image.logic import ensure_rgb
+from negpy.kernel.image.logic import apply_exif_orientation, ensure_rgb
 from negpy.kernel.system.logging import get_logger
 
 logger = get_logger(__name__)
@@ -143,6 +143,81 @@ def _tiff_preview_page(file_path: str) -> Optional[Image.Image]:
     if arr.dtype == np.uint16:
         arr = (arr >> 8).astype(np.uint8)
     return Image.fromarray(ensure_rgb(arr))
+
+
+_DNG_QUICK_PREVIEW_MAX_BYTES = 64 * 1024 * 1024
+_DNG_LINEAR_RAW = 34892
+_DNG_CFA = 32803
+
+
+def dng_quick_preview(file_path: str) -> Optional[Image.Image]:
+    """Decode the smallest usable reduced DNG IFD without reading the main image."""
+    if os.path.splitext(file_path)[1].lower() != ".dng":
+        return None
+    try:
+        import tifffile
+
+        with tifffile.TiffFile(file_path) as tif:
+            roots = list(tif.pages)
+            pages: list[Any] = []
+            seen: set[int] = set()
+
+            def collect(page: Any) -> None:
+                offset = int(getattr(page, "offset", id(page)))
+                if offset in seen:
+                    return
+                seen.add(offset)
+                pages.append(page)
+                for child in page.pages or ():
+                    collect(child)
+
+            for root in roots:
+                collect(root)
+
+            if not pages:
+                return None
+            largest_pixels = max(int(np.prod(page.shape[:2])) for page in pages if len(page.shape) >= 2)
+            candidates: list[tuple[int, int, Any]] = []
+            for page in pages:
+                shape = tuple(int(v) for v in page.shape)
+                if len(shape) not in (2, 3) or (len(shape) == 3 and shape[2] not in (1, 3, 4)):
+                    continue
+                tags = page.tags
+                subfile = tags.get("NewSubfileType")
+                reduced = bool(int(subfile.value) & 1) if subfile is not None else False
+                pixels = shape[0] * shape[1]
+                if not reduced and not (page is pages[0] and bool(page.pages) and pixels < largest_pixels):
+                    continue
+                photo_tag = tags.get("PhotometricInterpretation")
+                photo = int(photo_tag.value) if photo_tag is not None else 0
+                samples = shape[2] if len(shape) == 3 else 1
+                if photo == _DNG_CFA or (photo == _DNG_LINEAR_RAW and samples < 3):
+                    continue
+                decoded_bytes = int(np.prod(shape)) * int(np.dtype(page.dtype).itemsize)
+                if decoded_bytes > _DNG_QUICK_PREVIEW_MAX_BYTES or page.dtype not in (np.uint8, np.uint16):
+                    continue
+                long_edge = max(shape[:2])
+                below_target = int(long_edge < 256)
+                candidates.append((below_target, pixels if not below_target else -pixels, page))
+
+            if not candidates:
+                return None
+            page = min(candidates, key=lambda item: (item[0], item[1]))[2]
+            arr = page.asarray()  # type: ignore[attr-defined]
+            orientation_tag = page.tags.get("Orientation") or pages[0].tags.get("Orientation")
+            orientation = int(orientation_tag.value) if orientation_tag is not None else 1
+    except Exception as e:
+        logger.warning(f"DNG quick preview read failed for {file_path}: {e}")
+        return None
+
+    if arr.dtype == np.uint16:
+        arr = (arr >> 8).astype(np.uint8)
+    arr = ensure_rgb(arr)
+    if arr.ndim == 3 and arr.shape[2] > 3:
+        arr = arr[:, :, :3]
+    if orientation != 1:
+        arr = apply_exif_orientation(arr, orientation)
+    return Image.fromarray(np.ascontiguousarray(arr))
 
 
 def embedded_preview(raw: Any, file_path: str) -> Optional[Image.Image]:

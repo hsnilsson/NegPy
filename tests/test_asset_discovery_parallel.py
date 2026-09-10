@@ -75,15 +75,14 @@ class TestMapFiles(unittest.TestCase):
 
 
 class TestThumbnailStreaming(unittest.TestCase):
-    """The filmstrip must fill in during the batch, not only at the end."""
+    """The filmstrip queue yields between files and can be cancelled."""
 
     def _run(self, count: int):
-        worker = ThumbnailWorker.__new__(ThumbnailWorker)
-        worker._store = None
-        worker.progress = _Recorder()
-        worker.partial = _Recorder()
-        worker.finished = _Recorder()
-        worker.error = _Recorder()
+        worker = ThumbnailWorker(None)
+        partial: list[dict] = []
+        finished: list[dict] = []
+        worker.partial.connect(partial.append)
+        worker.finished.connect(finished.append)
 
         files = [{"name": f"f{i}", "path": f"/tmp/f{i}.arw", "hash": f"h{i}"} for i in range(count)]
         with patch(
@@ -91,21 +90,44 @@ class TestThumbnailStreaming(unittest.TestCase):
             lambda *a, **k: Image.new("RGB", (4, 4)),
         ):
             worker.generate(files)
-        return worker
+            worker._next_timer.stop()
+            while worker._active:
+                worker._process_next()
+                worker._next_timer.stop()
+        return worker, partial, finished
 
     def test_chunks_arrive_before_the_batch_finishes(self):
-        worker = self._run(20)
-        self.assertTrue(worker.partial.calls, "no chunk was emitted during the batch")
-        streamed = {k for (chunk,) in worker.partial.calls for k in chunk}
-        (final,) = worker.finished.calls
-        self.assertTrue(streamed.issubset(final[0]), "a streamed key is missing from the final map")
-        self.assertEqual(len(final[0]), 20)
+        _worker, partial, finished = self._run(20)
+        self.assertTrue(partial, "no chunk was emitted during the batch")
+        streamed = {key for chunk in partial for key in chunk}
+        self.assertEqual(len(streamed | set(finished[0])), 20)
 
     def test_small_batch_still_completes(self):
         """Under one chunk nothing streams, and the final map still carries every file."""
-        worker = self._run(3)
-        self.assertEqual(worker.partial.calls, [])
-        self.assertEqual(len(worker.finished.calls[0][0]), 3)
+        _worker, partial, finished = self._run(3)
+        self.assertEqual(partial, [])
+        self.assertEqual(len(finished[0]), 3)
+
+    def test_cancel_stops_before_the_next_file(self):
+        worker = ThumbnailWorker(None)
+        finished: list[dict] = []
+        worker.finished.connect(finished.append)
+        files = [{"name": f"f{i}", "path": f"/tmp/f{i}.arw", "hash": f"h{i}"} for i in range(3)]
+        calls: list[str] = []
+
+        with patch(
+            "negpy.services.assets.thumbnails.get_thumbnail_worker",
+            side_effect=lambda path, *a, **k: calls.append(path) or Image.new("RGB", (4, 4)),
+        ):
+            worker.generate(files)
+            worker._next_timer.stop()
+            worker._process_next()
+            worker._next_timer.stop()
+            worker.cancel_pending()
+            worker._process_next()
+
+        self.assertEqual(calls, ["/tmp/f0.arw"])
+        self.assertEqual(set(finished[0]), {"h0-v3"})
 
 
 if __name__ == "__main__":
