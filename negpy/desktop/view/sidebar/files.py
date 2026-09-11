@@ -106,6 +106,12 @@ class _ThumbnailDelegate(QStyledItemDelegate):
         y = area.y() + (area.height() - size.height()) // 2
         return QRect(x, y, size.width(), size.height())
 
+    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
+        view = self.parent()
+        if isinstance(view, QListView) and view.iconSize().isValid():
+            return view.iconSize()
+        return super().sizeHint(option, index)
+
     def _draw_mark_badge(self, painter: QPainter, img_rect: QRect, check: bool) -> None:
         r = 9
         cx, cy = img_rect.right() - r - 4, img_rect.bottom() - r - 4
@@ -174,7 +180,7 @@ class _ThumbnailDelegate(QStyledItemDelegate):
             painter.save()
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             area = option.rect.adjusted(self._MARGIN, self._MARGIN, -self._MARGIN, -self._MARGIN)
-            img_rect = self._fit_rect(area, QSize(3, 2))
+            img_rect = area
             selected = bool(option.state & QStyle.StateFlag.State_Selected)
             painter.setPen(QPen(QColor(THEME.accent_primary if selected else THEME.border_color), 1))
             painter.setBrush(QColor(THEME.bg_header))

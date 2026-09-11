@@ -2,12 +2,18 @@ from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PyQt6.QtCore import QPoint, QPointF, QPropertyAnimation, QRect, QSize, Qt
+from PyQt6.QtCore import QModelIndex, QPoint, QPointF, QPropertyAnimation, QRect, Qt
 from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap, QWheelEvent
 from PyQt6.QtWidgets import QAbstractItemView, QApplication, QDialog, QStyleOptionViewItem
 
 from negpy.desktop.session import DesktopSessionManager, composite_kind, composite_summary
-from negpy.desktop.view.sidebar.files import THUMB_CELL_MAX, THUMB_CELL_MIN, FileBrowser, _ThumbnailDelegate
+from negpy.desktop.view.sidebar.files import (
+    THUMB_CELL_MAX,
+    THUMB_CELL_MIN,
+    FileBrowser,
+    ThumbnailGridView,
+    _ThumbnailDelegate,
+)
 from negpy.desktop.view.styles.theme import THEME
 from negpy.desktop.view.widgets.granular_settings_dialog import GranularSettingsDialog
 from negpy.domain.models import WorkspaceConfig
@@ -673,12 +679,18 @@ def _render(asset: dict, *, with_thumbnail: bool = True) -> QImage:
     return canvas.toImage()
 
 
-def test_placeholder_uses_the_same_photo_shape_as_a_landscape_thumbnail(qapp):
-    area = QRect(3, 3, 114, 114)
-    delegate = _ThumbnailDelegate()
+def test_placeholder_fills_the_square_thumbnail_cell(qapp):
+    image = _render({}, with_thumbnail=False)
 
-    assert delegate._fit_rect(area, QSize(3, 2)) == delegate._fit_rect(area, QSize(60, 40))
-    assert _render({}, with_thumbnail=False).pixelColor(60, 60) != QColor("#000000")
+    assert image.pixelColor(60, 4) != QColor("#000000")
+    assert image.pixelColor(4, 60) != QColor("#000000")
+
+
+def test_placeholder_item_uses_the_full_thumbnail_cell(qapp):
+    view = ThumbnailGridView(target_cell=THUMB_CELL_MIN)
+    delegate = _ThumbnailDelegate(view)
+
+    assert delegate.sizeHint(QStyleOptionViewItem(), QModelIndex()) == view.iconSize()
 
 
 def _badge_corner(image: QImage) -> list:
