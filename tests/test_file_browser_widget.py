@@ -2,7 +2,7 @@ from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PyQt6.QtCore import QPoint, QPointF, QPropertyAnimation, QRect, Qt
+from PyQt6.QtCore import QPoint, QPointF, QPropertyAnimation, QRect, QSize, Qt
 from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap, QWheelEvent
 from PyQt6.QtWidgets import QAbstractItemView, QApplication, QDialog, QStyleOptionViewItem
 
@@ -651,15 +651,16 @@ def test_tooltip_names_what_the_frame_is_built_from(session):
     assert tips.count("/tmp/a.cr2") == 1  # the plain frame keeps the path alone
 
 
-def _render(asset: dict) -> QImage:
+def _render(asset: dict, *, with_thumbnail: bool = True) -> QImage:
     """Paint one delegate cell onto a pixmap. paint() reads only index.data(), so a
     stub index is enough."""
     thumb = QPixmap(60, 40)
     thumb.fill(QColor("#808080"))
+    icon = QIcon(thumb) if with_thumbnail else QIcon()
     index = MagicMock()
     index.data.side_effect = lambda role: {
         Qt.ItemDataRole.UserRole: asset,
-        Qt.ItemDataRole.DecorationRole: QIcon(thumb),
+        Qt.ItemDataRole.DecorationRole: icon,
     }.get(role)
 
     canvas = QPixmap(120, 120)
@@ -670,6 +671,14 @@ def _render(asset: dict) -> QImage:
     _ThumbnailDelegate().paint(painter, option, index)
     painter.end()
     return canvas.toImage()
+
+
+def test_placeholder_uses_the_same_photo_shape_as_a_landscape_thumbnail(qapp):
+    area = QRect(3, 3, 114, 114)
+    delegate = _ThumbnailDelegate()
+
+    assert delegate._fit_rect(area, QSize(3, 2)) == delegate._fit_rect(area, QSize(60, 40))
+    assert _render({}, with_thumbnail=False).pixelColor(60, 60) != QColor("#000000")
 
 
 def _badge_corner(image: QImage) -> list:
