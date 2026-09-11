@@ -1,5 +1,5 @@
 import os
-from typing import Optional, Any, Dict, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 from PIL import Image
 import rawpy
 from negpy.kernel.system.config import APP_CONFIG
@@ -11,7 +11,7 @@ from negpy.infrastructure.loaders.constants import (
     SUPPORTED_JXL_EXTENSIONS,
     SUPPORTED_TIFF_EXTENSIONS,
 )
-from negpy.infrastructure.loaders.helpers import dng_quick_preview, embedded_preview
+from negpy.infrastructure.loaders.helpers import dng_bounded_preview, dng_quick_preview, embedded_preview
 from negpy.infrastructure.display.color_spaces import WORKING_COLOR_SPACE
 from negpy.kernel.system.logging import get_logger
 
@@ -132,6 +132,42 @@ def decode_source_image(
         return img
 
 
+def decode_background_source_image(
+    file_path: str,
+    green_path: str = "",
+    blue_path: str = "",
+    *,
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> Optional[Image.Image]:
+    """Decode a source missed by the quick pass without retaining full-size pixels."""
+    max_edge = APP_CONFIG.thumbnail_size * 2
+
+    def decode_one(path: str) -> Optional[Image.Image]:
+        if should_cancel is not None and should_cancel():
+            raise InterruptedError("thumbnail cancelled")
+        handled, image = dng_bounded_preview(path, max_edge, should_cancel=should_cancel)
+        if not handled:
+            image = decode_source_image(path)
+        if image is not None:
+            image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+        return image
+
+    if not green_path or not blue_path:
+        return decode_one(file_path)
+
+    from negpy.features.rgbscan.logic import assemble_rgb
+
+    red_image = decode_one(file_path)
+    green_image = decode_one(green_path)
+    blue_image = decode_one(blue_path)
+    if red_image is None or green_image is None or blue_image is None:
+        return None
+    red = np.asarray(red_image.convert("RGB"))
+    green = np.asarray(green_image.convert("RGB"))
+    blue = np.asarray(blue_image.convert("RGB"))
+    return Image.fromarray(assemble_rgb(red, green, blue, align=False))
+
+
 def preview_positive(img: Image.Image, process_mode: str = "") -> Image.Image:
     """Invert a negative preview so the filmstrip reads as photographs before a frame
     has ever been opened.
@@ -184,6 +220,9 @@ def get_thumbnail_worker(
     crop_rect: Optional[tuple[float, float, float, float]] = None,
     gutter_thickness: float = 0.0,
     process_mode: str = "",
+    *,
+    fast_only: bool = False,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> Optional[Image.Image]:
     """
     Checks cache -> extracts/renders -> resize.
@@ -201,10 +240,18 @@ def get_thumbnail_worker(
             return None
 
         img = decode_source_image(file_path, green_path, blue_path, quick_only=True)
+        if img is None and not fast_only:
+            img = decode_background_source_image(
+                file_path,
+                green_path,
+                blue_path,
+                should_cancel=should_cancel,
+            )
         if img is None:
-            save_miss = getattr(asset_store, "save_thumbnail_miss", None) if asset_store else None
-            if callable(save_miss):
-                save_miss(cache_key)
+            if not fast_only:
+                save_miss = getattr(asset_store, "save_thumbnail_miss", None) if asset_store else None
+                if callable(save_miss):
+                    save_miss(cache_key)
             return None
 
         if half:
@@ -221,9 +268,11 @@ def get_thumbnail_worker(
             asset_store.save_thumbnail(cache_key, square_img)
 
         return square_img
+    except InterruptedError:
+        return None
     except Exception as e:
         logger.error(f"Thumbnail Error for {file_path}: {e}")
-        if asset_store:
+        if asset_store and not fast_only:
             save_miss = getattr(asset_store, "save_thumbnail_miss", None)
             if callable(save_miss):
                 save_miss(thumbnail_cache_key(file_hash, bool(green_path and blue_path)))

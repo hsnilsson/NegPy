@@ -8,6 +8,7 @@ from negpy.kernel.system.logging import get_logger
 from negpy.domain.interfaces import IAssetStore
 
 logger = get_logger(__name__)
+_THUMBNAIL_MISS_SUFFIX = ".miss-v2"
 
 
 class LocalAssetStore(IAssetStore):
@@ -83,11 +84,11 @@ class LocalAssetStore(IAssetStore):
         return None
 
     def has_thumbnail_miss(self, file_hash: str) -> bool:
-        return os.path.exists(os.path.join(self.thumb_dir, f"{file_hash}.miss"))
+        return os.path.exists(os.path.join(self.thumb_dir, f"{file_hash}{_THUMBNAIL_MISS_SUFFIX}"))
 
     def save_thumbnail_miss(self, file_hash: str) -> None:
         try:
-            marker = os.path.join(self.thumb_dir, f"{file_hash}.miss")
+            marker = os.path.join(self.thumb_dir, f"{file_hash}{_THUMBNAIL_MISS_SUFFIX}")
             with open(marker, "wb"):
                 pass
         except Exception as e:
@@ -99,9 +100,10 @@ class LocalAssetStore(IAssetStore):
             thumb_path = os.path.join(self.thumb_dir, f"{file_hash}.jpg")
             # Save as JPEG for speed and smaller file size
             image.save(thumb_path, "JPEG", quality=85)
-            miss_path = os.path.join(self.thumb_dir, f"{file_hash}.miss")
-            if os.path.exists(miss_path):
-                os.remove(miss_path)
+            for suffix in (".miss", _THUMBNAIL_MISS_SUFFIX):
+                miss_path = os.path.join(self.thumb_dir, f"{file_hash}{suffix}")
+                if os.path.exists(miss_path):
+                    os.remove(miss_path)
         except Exception as e:
             logger.error(f"Failed to save thumbnail {file_hash}: {e}")
 

@@ -108,6 +108,38 @@ class TestThumbnailStreaming(unittest.TestCase):
         self.assertEqual(partial, [])
         self.assertEqual(len(finished[0]), 3)
 
+    def test_slow_fallbacks_wait_until_every_fast_preview_was_tried(self):
+        worker = ThumbnailWorker(None)
+        finished: list[dict] = []
+        worker.finished.connect(finished.append)
+        files = [{"name": f"f{i}", "path": f"/tmp/f{i}.dng", "hash": f"h{i}"} for i in range(3)]
+        calls: list[tuple[str, bool]] = []
+
+        def thumbnail(path, *args, fast_only=False, **kwargs):
+            calls.append((path, fast_only))
+            if fast_only and path != "/tmp/f0.dng":
+                return None
+            return Image.new("RGB", (4, 4))
+
+        with patch("negpy.services.assets.thumbnails.get_thumbnail_worker", side_effect=thumbnail):
+            worker.generate(files)
+            worker._next_timer.stop()
+            while worker._active:
+                worker._process_next()
+                worker._next_timer.stop()
+
+        self.assertEqual(
+            calls,
+            [
+                ("/tmp/f0.dng", True),
+                ("/tmp/f1.dng", True),
+                ("/tmp/f2.dng", True),
+                ("/tmp/f1.dng", False),
+                ("/tmp/f2.dng", False),
+            ],
+        )
+        self.assertEqual(set(finished[0]), {"h0-v3", "h1-v3", "h2-v3"})
+
     def test_cancel_stops_before_the_next_file(self):
         worker = ThumbnailWorker(None)
         finished: list[dict] = []

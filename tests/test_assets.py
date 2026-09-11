@@ -54,6 +54,13 @@ class TestThumbnailCacheSize(unittest.TestCase):
         self.assertFalse(self.store.has_thumbnail_miss("h_later"))
         self.assertIsNotNone(self.store.get_thumbnail("h_later"))
 
+    def test_old_quick_only_miss_does_not_block_the_slow_fallback(self):
+        old_marker = os.path.join(self.store.thumb_dir, "h_retry.miss")
+        with open(old_marker, "wb"):
+            pass
+
+        self.assertFalse(self.store.has_thumbnail_miss("h_retry"))
+
     def test_truncated_thumbnail_is_a_miss(self):
         """A half-written entry (a kill or a full disk during the write) opens on its
         header alone. It has to fail here, where the miss regenerates it, and not later

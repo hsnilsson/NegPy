@@ -1,7 +1,8 @@
 import os
 import io
+import time
 from types import SimpleNamespace
-from typing import Any, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 import numpy as np
 import rawpy
@@ -146,8 +147,45 @@ def _tiff_preview_page(file_path: str) -> Optional[Image.Image]:
 
 
 _DNG_QUICK_PREVIEW_MAX_BYTES = 64 * 1024 * 1024
+_DNG_STREAM_PREVIEW_MAX_BYTES = 64 * 1024 * 1024
+_DNG_STREAM_PREVIEW_TIMEOUT_S = 20.0
 _DNG_LINEAR_RAW = 34892
 _DNG_CFA = 32803
+
+
+def _collect_dng_pages(tif: Any) -> list[Any]:
+    pages: list[Any] = []
+    seen: set[int] = set()
+
+    def collect(page: Any) -> None:
+        offset = int(getattr(page, "offset", id(page)))
+        if offset in seen:
+            return
+        seen.add(offset)
+        pages.append(page)
+        for child in page.pages or ():
+            collect(child)
+
+    for root in tif.pages:
+        collect(root)
+    return pages
+
+
+def _dng_tag_floats(tag: Any) -> np.ndarray:
+    if tag is None:
+        return np.empty(0, dtype=np.float32)
+    try:
+        return np.asarray(tag.value, dtype=np.float32).reshape(-1)
+    except (TypeError, ValueError):
+        return np.empty(0, dtype=np.float32)
+
+
+def _dng_rgb_values(values: np.ndarray, default: float) -> np.ndarray:
+    if values.size >= 3:
+        return values[:3].reshape(1, 1, 3)
+    if values.size == 1:
+        return np.full((1, 1, 3), float(values[0]), dtype=np.float32)
+    return np.full((1, 1, 3), default, dtype=np.float32)
 
 
 def dng_quick_preview(file_path: str) -> Optional[Image.Image]:
@@ -158,21 +196,7 @@ def dng_quick_preview(file_path: str) -> Optional[Image.Image]:
         import tifffile
 
         with tifffile.TiffFile(file_path) as tif:
-            roots = list(tif.pages)
-            pages: list[Any] = []
-            seen: set[int] = set()
-
-            def collect(page: Any) -> None:
-                offset = int(getattr(page, "offset", id(page)))
-                if offset in seen:
-                    return
-                seen.add(offset)
-                pages.append(page)
-                for child in page.pages or ():
-                    collect(child)
-
-            for root in roots:
-                collect(root)
+            pages = _collect_dng_pages(tif)
 
             if not pages:
                 return None
@@ -218,6 +242,128 @@ def dng_quick_preview(file_path: str) -> Optional[Image.Image]:
     if orientation != 1:
         arr = apply_exif_orientation(arr, orientation)
     return Image.fromarray(np.ascontiguousarray(arr))
+
+
+def dng_bounded_preview(
+    file_path: str,
+    max_edge: int,
+    *,
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> tuple[bool, Optional[Image.Image]]:
+    """Stream a LinearRaw DNG into a small preview with bounded segment memory.
+
+    The boolean is true when the DNG is LinearRaw and must not fall through to a
+    full-array loader, including when its layout or time budget prevents a preview.
+    """
+    if os.path.splitext(file_path)[1].lower() != ".dng":
+        return False, None
+
+    handled = False
+    try:
+        import tifffile
+
+        with tifffile.TiffFile(file_path) as tif:
+            pages = _collect_dng_pages(tif)
+            candidates = []
+            for page in pages:
+                shape = tuple(int(v) for v in page.shape)
+                photo_tag = page.tags.get("PhotometricInterpretation")
+                photo = int(photo_tag.value) if photo_tag is not None else 0
+                if len(shape) == 3 and shape[2] in (3, 4) and photo == _DNG_LINEAR_RAW:
+                    candidates.append(page)
+            if not candidates:
+                return False, None
+
+            handled = True
+            page = max(candidates, key=lambda item: int(np.prod(item.shape[:2])))
+            height, width, _samples = (int(v) for v in page.shape)
+            itemsize = int(np.dtype(page.dtype).itemsize)
+            segment_height = int(page.tilelength if page.is_tiled else page.rowsperstrip or height)
+            segment_width = int(page.tilewidth if page.is_tiled else width)
+            segment_bytes = segment_height * segment_width * int(page.samplesperpixel) * itemsize
+            if page.dtype not in (np.uint8, np.uint16) or segment_bytes > _DNG_STREAM_PREVIEW_MAX_BYTES:
+                return True, None
+
+            scale = min(1.0, max(1, int(max_edge)) / max(height, width))
+            out_height = max(1, int(round(height * scale)))
+            out_width = max(1, int(round(width * scale)))
+            output = np.zeros((out_height, out_width, 3), dtype=np.uint8)
+
+            def tag(name: str) -> Any:
+                return page.tags.get(name) or pages[0].tags.get(name)
+
+            dtype_max = float(np.iinfo(page.dtype).max)
+            black = _dng_rgb_values(_dng_tag_floats(tag("BlackLevel")), 0.0)
+            white = _dng_rgb_values(_dng_tag_floats(tag("WhiteLevel")), dtype_max)
+            neutral = _dng_tag_floats(pages[0].tags.get("AsShotNeutral"))
+            wb = np.ones((1, 1, 3), dtype=np.float32)
+            if neutral.size >= 3 and np.all(neutral[:3] > 0):
+                wb[0, 0] = (neutral[1] / neutral[0], 1.0, neutral[1] / neutral[2])
+            linearization_tag = tag("LinearizationTable")
+            linearization = np.asarray(linearization_tag.value, dtype=np.float32) if linearization_tag is not None else None
+            crop_origin = _dng_tag_floats(tag("DefaultCropOrigin"))
+            crop_size = _dng_tag_floats(tag("DefaultCropSize"))
+            orientation_tag = tag("Orientation")
+            orientation = int(orientation_tag.value) if orientation_tag is not None else 1
+            deadline = time.monotonic() + _DNG_STREAM_PREVIEW_TIMEOUT_S
+
+            for decoded, position, _shape in page.segments(maxworkers=1):
+                if should_cancel is not None and should_cancel():
+                    raise InterruptedError("thumbnail cancelled")
+                if time.monotonic() > deadline:
+                    return True, None
+                if decoded is None:
+                    continue
+                tile = decoded[0] if decoded.ndim == 4 else decoded
+                if tile.ndim != 3 or tile.shape[2] < 3:
+                    return True, None
+                y, x = int(position[2]), int(position[3])
+                valid_height = min(tile.shape[0], height - y)
+                valid_width = min(tile.shape[1], width - x)
+                if valid_height <= 0 or valid_width <= 0:
+                    continue
+                source = tile[:valid_height, :valid_width, :3]
+                if linearization is not None:
+                    indices = np.clip(source, 0, linearization.size - 1).astype(np.int32)
+                    data = linearization[indices]
+                else:
+                    data = source.astype(np.float32)
+                data = np.clip((data - black) / np.maximum(white - black, 1e-6), 0.0, 1.0)
+                data = np.clip(data * wb, 0.0, 1.0)
+                low = data < 0.018
+                data[low] *= 4.5
+                data[~low] = 1.099 * np.power(data[~low], 1.0 / 2.222) - 0.099
+                tile_u8 = np.clip(data * 255.0, 0, 255).astype(np.uint8)
+
+                left = int(round(x * out_width / width))
+                top = int(round(y * out_height / height))
+                right = int(round((x + valid_width) * out_width / width))
+                bottom = int(round((y + valid_height) * out_height / height))
+                if right <= left or bottom <= top:
+                    continue
+                small = Image.fromarray(tile_u8).resize((right - left, bottom - top), Image.Resampling.BOX)
+                output[top:bottom, left:right] = np.asarray(small)
+
+            image = Image.fromarray(output)
+            if crop_origin.size >= 2 and crop_size.size >= 2:
+                ox, oy = float(crop_origin[0]), float(crop_origin[1])
+                crop_width, crop_height = float(crop_size[0]), float(crop_size[1])
+                box = (
+                    max(0, int(round(ox * out_width / width))),
+                    max(0, int(round(oy * out_height / height))),
+                    min(out_width, int(round((ox + crop_width) * out_width / width))),
+                    min(out_height, int(round((oy + crop_height) * out_height / height))),
+                )
+                if box[2] > box[0] and box[3] > box[1]:
+                    image = image.crop(box)
+            if orientation != 1:
+                image = Image.fromarray(apply_exif_orientation(np.asarray(image), orientation))
+            return True, image
+    except InterruptedError:
+        raise
+    except Exception as e:
+        logger.warning(f"DNG bounded preview read failed for {file_path}: {e}")
+        return handled, None
 
 
 def embedded_preview(raw: Any, file_path: str) -> Optional[Image.Image]:
