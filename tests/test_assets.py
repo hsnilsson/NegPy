@@ -91,9 +91,12 @@ class TestThumbnailCacheClearing(unittest.TestCase):
     def test_stats_report_count_and_bytes(self):
         self._save("h1")
         self._save("h2")
+        self.store.save_thumbnail_miss("unavailable")
         count, size = self.store.thumbnail_stats()
         self.assertEqual(count, 2)
-        on_disk = sum(os.path.getsize(os.path.join(self.store.thumb_dir, f)) for f in os.listdir(self.store.thumb_dir))
+        on_disk = sum(
+            os.path.getsize(os.path.join(self.store.thumb_dir, f)) for f in os.listdir(self.store.thumb_dir) if f.lower().endswith(".jpg")
+        )
         self.assertEqual(size, on_disk)
 
     def test_stats_are_zero_without_a_cache_dir(self):

@@ -130,7 +130,7 @@ class LocalAssetStore(IAssetStore):
     def thumbnail_stats(self) -> Tuple[int, int]:
         """(count, total bytes) of cached thumbnails."""
         try:
-            entries = [e for e in os.scandir(self.thumb_dir) if e.is_file()]
+            entries = [e for e in os.scandir(self.thumb_dir) if e.is_file() and e.name.lower().endswith(".jpg")]
         except OSError:
             return 0, 0
         return len(entries), sum(e.stat().st_size for e in entries)

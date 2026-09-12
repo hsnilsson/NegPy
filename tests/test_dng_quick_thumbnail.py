@@ -1,11 +1,17 @@
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 import tifffile
 
-from negpy.infrastructure.loaders.helpers import dng_bounded_preview, dng_quick_preview
+from negpy.infrastructure.loaders.helpers import _dng_tag_floats, dng_bounded_preview, dng_quick_preview
 from negpy.infrastructure.storage.local_asset_store import LocalAssetStore
-from negpy.services.assets.thumbnails import decode_source_image, get_thumbnail_worker, thumbnail_cache_key
+from negpy.services.assets.thumbnails import (
+    decode_background_source_image,
+    decode_source_image,
+    get_thumbnail_worker,
+    thumbnail_cache_key,
+)
 
 
 def test_reduced_dng_ifd_is_used_without_decoding_main_pixels(tmp_path):
@@ -64,6 +70,26 @@ def test_linear_dng_tiles_stream_into_a_bounded_preview(tmp_path):
     assert result.size == (30, 20)
     preview = np.asarray(result)
     assert preview[..., 1].mean() > preview[..., 0].mean()
+
+
+def test_dng_rational_tags_are_converted_to_floats():
+    tag = SimpleNamespace(dtype=5, value=(1, 2, 3, 4, 5, 0))
+
+    np.testing.assert_allclose(_dng_tag_floats(tag), (0.5, 0.75, 0.0))
+
+
+def test_background_raw_without_a_bounded_decoder_keeps_placeholder():
+    with (
+        patch("negpy.services.assets.thumbnails.dng_bounded_preview", return_value=(False, None)) as bounded,
+        patch("negpy.services.assets.thumbnails.decode_source_image") as full_decode,
+    ):
+        dng_result = decode_background_source_image("camera.dng")
+        raw_result = decode_background_source_image("camera.arw")
+
+    assert dng_result is None
+    assert raw_result is None
+    assert bounded.call_count == 2
+    full_decode.assert_not_called()
 
 
 def test_fast_pass_defers_a_missing_preview_without_caching_failure(tmp_path):

@@ -16,6 +16,7 @@ from negpy.infrastructure.display.color_spaces import WORKING_COLOR_SPACE
 from negpy.kernel.system.logging import get_logger
 
 logger = get_logger(__name__)
+_DIRECT_IMAGE_EXTENSIONS = SUPPORTED_TIFF_EXTENSIONS | SUPPORTED_JPEG_EXTENSIONS | SUPPORTED_JXL_EXTENSIONS
 
 
 def asset_thumbnail_key(asset: Dict[str, Any]) -> str:
@@ -120,7 +121,7 @@ def decode_source_image(
         img: Optional[Image.Image] = embedded_preview(raw, file_path)
 
         if img is None:
-            display_file = ext in SUPPORTED_TIFF_EXTENSIONS | SUPPORTED_JPEG_EXTENSIONS | SUPPORTED_JXL_EXTENSIONS
+            display_file = ext in _DIRECT_IMAGE_EXTENSIONS
             if quick_only and not display_file:
                 return None
             img = Image.fromarray(_fast_demosaic(raw))
@@ -139,7 +140,7 @@ def decode_background_source_image(
     *,
     should_cancel: Optional[Callable[[], bool]] = None,
 ) -> Optional[Image.Image]:
-    """Decode a source missed by the quick pass without retaining full-size pixels."""
+    """Decode a source missed by the quick pass without a full RAW demosaic."""
     max_edge = APP_CONFIG.thumbnail_size * 2
 
     def decode_one(path: str) -> Optional[Image.Image]:
@@ -147,6 +148,8 @@ def decode_background_source_image(
             raise InterruptedError("thumbnail cancelled")
         handled, image = dng_bounded_preview(path, max_edge, should_cancel=should_cancel)
         if not handled:
+            if os.path.splitext(path)[1].lower() not in _DIRECT_IMAGE_EXTENSIONS:
+                return None
             image = decode_source_image(path)
         if image is not None:
             image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)

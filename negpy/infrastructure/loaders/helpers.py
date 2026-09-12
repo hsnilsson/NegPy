@@ -175,8 +175,20 @@ def _dng_tag_floats(tag: Any) -> np.ndarray:
     if tag is None:
         return np.empty(0, dtype=np.float32)
     try:
-        return np.asarray(tag.value, dtype=np.float32).reshape(-1)
-    except (TypeError, ValueError):
+        values = np.asarray(tag.value, dtype=np.float32).reshape(-1)
+        if int(tag.dtype) in (5, 10):
+            if values.size % 2:
+                return np.empty(0, dtype=np.float32)
+            numerators = values[0::2]
+            denominators = values[1::2]
+            return np.divide(
+                numerators,
+                denominators,
+                out=np.zeros_like(numerators),
+                where=denominators != 0,
+            )
+        return values
+    except (AttributeError, TypeError, ValueError):
         return np.empty(0, dtype=np.float32)
 
 
