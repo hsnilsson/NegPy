@@ -4,7 +4,7 @@ from unittest.mock import patch
 import numpy as np
 import tifffile
 
-from negpy.infrastructure.loaders.helpers import _dng_tag_floats, dng_bounded_preview, dng_quick_preview
+from negpy.infrastructure.loaders.helpers import NonStandardFileWrapper, _dng_tag_floats, dng_bounded_preview, dng_quick_preview
 from negpy.infrastructure.storage.local_asset_store import LocalAssetStore
 from negpy.services.assets.thumbnails import (
     decode_background_source_image,
@@ -90,6 +90,41 @@ def test_background_raw_without_a_bounded_decoder_keeps_placeholder():
     assert raw_result is None
     assert bounded.call_count == 2
     full_decode.assert_not_called()
+
+
+def test_quick_thumbnail_uses_pixels_an_eager_loader_already_decoded():
+    with patch(
+        "negpy.services.assets.thumbnails.loader_factory.get_loader",
+        return_value=(NonStandardFileWrapper(np.full((8, 12, 3), 0.5, dtype=np.float32)), {"orientation": 1}),
+    ):
+        result = decode_source_image("scanner.raw", quick_only=True)
+
+    assert result is not None
+    assert result.size == (6, 4)
+
+
+def test_quick_thumbnail_does_not_demosaic_raw_without_embedded_preview():
+    class RawWithoutPreview:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def extract_thumb(self):
+            raise RuntimeError("no preview")
+
+    with (
+        patch(
+            "negpy.services.assets.thumbnails.loader_factory.get_loader",
+            return_value=(RawWithoutPreview(), {"orientation": 1}),
+        ),
+        patch("negpy.services.assets.thumbnails._fast_demosaic") as demosaic,
+    ):
+        result = decode_source_image("camera.raw", quick_only=True)
+
+    assert result is None
+    demosaic.assert_not_called()
 
 
 def test_fast_pass_defers_a_missing_preview_without_caching_failure(tmp_path):

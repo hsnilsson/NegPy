@@ -6,17 +6,11 @@ from negpy.kernel.system.config import APP_CONFIG
 import numpy as np
 from negpy.kernel.image.logic import apply_exif_orientation, ensure_rgb, float_to_uint8, prepare_thumbnail, srgb_to_linear, uint8_to_float32
 from negpy.infrastructure.loaders.factory import loader_factory
-from negpy.infrastructure.loaders.constants import (
-    SUPPORTED_JPEG_EXTENSIONS,
-    SUPPORTED_JXL_EXTENSIONS,
-    SUPPORTED_TIFF_EXTENSIONS,
-)
-from negpy.infrastructure.loaders.helpers import dng_bounded_preview, dng_quick_preview, embedded_preview
+from negpy.infrastructure.loaders.helpers import NonStandardFileWrapper, dng_bounded_preview, dng_quick_preview, embedded_preview
 from negpy.infrastructure.display.color_spaces import WORKING_COLOR_SPACE
 from negpy.kernel.system.logging import get_logger
 
 logger = get_logger(__name__)
-_DIRECT_IMAGE_EXTENSIONS = SUPPORTED_TIFF_EXTENSIONS | SUPPORTED_JPEG_EXTENSIONS | SUPPORTED_JXL_EXTENSIONS
 
 
 def asset_thumbnail_key(asset: Dict[str, Any]) -> str:
@@ -61,6 +55,16 @@ def _fast_demosaic(raw: Any) -> np.ndarray:
     )
 
 
+def _preview_from_loaded(raw: Any, file_path: str, quick_only: bool) -> Optional[Image.Image]:
+    """Use an embedded preview or pixels an eager non-rawpy loader already decoded."""
+    img = embedded_preview(raw, file_path)
+    if img is not None:
+        return img
+    if quick_only and not isinstance(raw, NonStandardFileWrapper):
+        return None
+    return Image.fromarray(_fast_demosaic(raw))
+
+
 def _decode_triplet_preview(red_path: str, green_path: str, blue_path: str, quick_only: bool = False) -> Optional[Image.Image]:
     """Merge an RGB-scan triplet's three narrowband exposures into one preview.
 
@@ -77,12 +81,10 @@ def _decode_triplet_preview(red_path: str, green_path: str, blue_path: str, quic
             return np.asarray(img.convert("RGB")), {"orientation": 1}
         ctx_mgr, metadata = loader_factory.get_loader(path)
         with ctx_mgr as raw:
-            img = embedded_preview(raw, path)
-            if img is not None:
-                return np.asarray(img.convert("RGB")), metadata
-            if quick_only:
+            img = _preview_from_loaded(raw, path, quick_only)
+            if img is None:
                 raise ValueError("RAW has no embedded preview")
-            return _fast_demosaic(raw), metadata
+            return np.asarray(img.convert("RGB")), metadata
 
     r, red_meta = _decode(red_path)
     g, _ = _decode(green_path)
@@ -118,13 +120,9 @@ def decode_source_image(
 
     ctx_mgr, metadata = loader_factory.get_loader(file_path)
     with ctx_mgr as raw:
-        img: Optional[Image.Image] = embedded_preview(raw, file_path)
-
+        img = _preview_from_loaded(raw, file_path, quick_only)
         if img is None:
-            display_file = ext in _DIRECT_IMAGE_EXTENSIONS
-            if quick_only and not display_file:
-                return None
-            img = Image.fromarray(_fast_demosaic(raw))
+            return None
 
         orientation = metadata.get("orientation", 1)
         if orientation and orientation != 1:
@@ -148,9 +146,7 @@ def decode_background_source_image(
             raise InterruptedError("thumbnail cancelled")
         handled, image = dng_bounded_preview(path, max_edge, should_cancel=should_cancel)
         if not handled:
-            if os.path.splitext(path)[1].lower() not in _DIRECT_IMAGE_EXTENSIONS:
-                return None
-            image = decode_source_image(path)
+            return None
         if image is not None:
             image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
         return image
