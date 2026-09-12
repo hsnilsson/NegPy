@@ -187,6 +187,7 @@ class PreviewLoadTask:
     file_path: str
     workspace_color_space: str
     use_camera_wb: bool
+    generation: int = 0
     positive_source: bool = False
     full_resolution: bool = False
     file_hash: str | None = None
@@ -985,9 +986,26 @@ class PreviewLoadWorker(QObject):
     def __init__(self, preview_service) -> None:
         super().__init__()
         self._preview_service = preview_service
+        self._generation_lock = threading.Lock()
+        self._latest_generation = 0
+
+    def expect_generation(self, generation: int) -> None:
+        """Make older queued and segment-based preview work obsolete."""
+        with self._generation_lock:
+            self._latest_generation = generation
+
+    def _is_current(self, task: PreviewLoadTask) -> bool:
+        with self._generation_lock:
+            return task.generation == self._latest_generation
 
     @pyqtSlot(PreviewLoadTask)
     def process(self, task: PreviewLoadTask) -> None:
+        if not self._is_current(task):
+            return
+
+        def cancelled() -> bool:
+            return not self._is_current(task)
+
         if task.for_cache_warm:
             try:
                 self._preview_service.load_linear_preview(
@@ -999,7 +1017,10 @@ class PreviewLoadWorker(QObject):
                     half_slice=task.half_slice,
                     demosaic=task.demosaic,
                     positive_source=task.positive_source,
+                    should_cancel=cancelled,
                 )
+            except InterruptedError:
+                pass
             except Exception as e:
                 logger.debug("Preview cache warm failed for %s: %s", task.file_path, e)
             return
@@ -1017,7 +1038,10 @@ class PreviewLoadWorker(QObject):
                     file_hash=task.file_hash,
                     flatfield_profile_id=task.flatfield_profile_id,
                     demosaic=task.demosaic,
+                    should_cancel=cancelled,
                 )
+                if not self._is_current(task):
+                    return
                 source_cs = metadata.get("color_space") or WORKING_COLOR_SPACE
                 ir_preview = metadata.get("ir_preview")
                 detected_mode = self._detect_mode(task, raw) if task.detect_mode else ""
@@ -1051,7 +1075,10 @@ class PreviewLoadWorker(QObject):
                     full_resolution=task.full_resolution,
                     file_hash=task.file_hash,
                     demosaic=task.demosaic,
+                    should_cancel=cancelled,
                 )
+                if not self._is_current(task):
+                    return
                 source_cs = metadata.get("color_space") or WORKING_COLOR_SPACE
                 ir_preview = metadata.get("ir_preview")
                 detected_mode = self._detect_mode(task, raw) if task.detect_mode else ""
@@ -1085,7 +1112,10 @@ class PreviewLoadWorker(QObject):
                     full_resolution=task.full_resolution,
                     file_hash=task.file_hash,
                     demosaic=task.demosaic,
+                    should_cancel=cancelled,
                 )
+                if not self._is_current(task):
+                    return
                 source_cs = metadata.get("color_space") or WORKING_COLOR_SPACE
                 ir_preview = metadata.get("ir_preview")
                 detected_mode = self._detect_mode(task, raw) if task.detect_mode else ""
@@ -1120,7 +1150,10 @@ class PreviewLoadWorker(QObject):
                     half_slice=task.half_slice,
                     demosaic=task.demosaic,
                     positive_source=task.positive_source,
+                    should_cancel=cancelled,
                 )
+                if not self._is_current(task):
+                    return
                 if sp is not None:
                     sbuf, sdims = sp
                     self.splash.emit(task.file_path, sbuf, sdims)
@@ -1135,7 +1168,10 @@ class PreviewLoadWorker(QObject):
                     half_slice=task.half_slice,
                     demosaic=task.demosaic,
                     positive_source=task.positive_source,
+                    should_cancel=cancelled,
                 )
+                if not self._is_current(task):
+                    return
             source_cs = metadata.get("color_space") or WORKING_COLOR_SPACE
             ir_preview = metadata.get("ir_preview")
             detected_mode = self._detect_mode(task, raw) if task.detect_mode else ""
@@ -1157,6 +1193,8 @@ class PreviewLoadWorker(QObject):
                 (metadata.get("cam_xyz"), metadata.get("camera_wb")),
                 metadata.get("detect_preview"),
             )
+        except InterruptedError:
+            return
         except Exception as e:
             logger.exception(f"Asset load failed: {task.file_path}")
             # libraw reports "Unsupported file format or not RAW file" for a file whose tags it

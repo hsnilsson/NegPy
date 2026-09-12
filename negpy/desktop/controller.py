@@ -1676,6 +1676,7 @@ class AppController(QObject):
         Dispatches RAW decode to a background worker to keep the UI thread free.
         """
         self._prefetch_gen += 1
+        self.preview_load_worker.expect_generation(self._prefetch_gen)
         self._preview_load_t0 = time.perf_counter()
         self._requested_file_path = file_path
         # A strip belongs to one frame, and the memo fast path below repaints without
@@ -1775,6 +1776,7 @@ class AppController(QObject):
                 file_path=file_path,
                 workspace_color_space=self.state.workspace_color_space,
                 use_camera_wb=not effective_linear_raw(self.state.config.process, self.state.config.exposure.render_intent),
+                generation=self._prefetch_gen,
                 positive_source=self.state.config.process.positive_source,
                 full_resolution=self.state.hq_preview,
                 # The half suffix distinguishes the two halves' preview caches now
@@ -1910,6 +1912,7 @@ class AppController(QObject):
                         file_path=path,
                         workspace_color_space=self.state.workspace_color_space,
                         use_camera_wb=not linear_raw,
+                        generation=g,
                         positive_source=saved.process.positive_source if saved else False,
                         # Half-size only: a full-res HQ neighbour evicts the active buffer.
                         # The cache key separates resolutions.

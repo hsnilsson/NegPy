@@ -1,5 +1,6 @@
 import os
-from typing import Any, ContextManager, Tuple
+from collections.abc import Callable
+from typing import Any, ContextManager, Optional, Tuple
 from negpy.infrastructure.loaders.pakon_loader import PakonLoader
 from negpy.infrastructure.loaders.tiff_loader import TiffLoader
 from negpy.infrastructure.loaders.jpeg_loader import JpegLoader
@@ -30,7 +31,14 @@ class LoaderFactory:
         self._jxl = JxlLoader()
         self._rawpy = RawpyLoader()
 
-    def get_loader(self, file_path: str, linear_raw: bool = False, positive_source: bool = False) -> Tuple[ContextManager[Any], dict]:
+    def get_loader(
+        self,
+        file_path: str,
+        linear_raw: bool = False,
+        positive_source: bool = False,
+        preview_max_edge: Optional[int] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
+    ) -> Tuple[ContextManager[Any], dict]:
         ext = os.path.splitext(file_path)[1].lower()
 
         if ext in SUPPORTED_TIFF_EXTENSIONS:
@@ -54,7 +62,7 @@ class LoaderFactory:
         if is_flextight_fff(file_path):
             return self._fff.load(file_path, linear_raw=linear_raw)
 
-        return self._rawpy.load(file_path)
+        return self._rawpy.load(file_path, preview_max_edge=preview_max_edge, should_cancel=should_cancel)
 
 
 # Global instance for shared use

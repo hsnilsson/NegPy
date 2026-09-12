@@ -1,8 +1,10 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
+import pytest
 import rawpy
 import tifffile
 
@@ -176,6 +178,64 @@ def test_rawpy_loader_falls_back_to_tifffile_when_libraw_cant_unpack():
     assert ctx_mgr.wb_gains is not None
     assert metadata["ir"] is None
     assert metadata["color_space"] is None
+
+
+def test_jxl_linear_dng_preview_streams_without_a_full_array_decode():
+    h, w = 12, 10
+    table = np.linspace(0, 65535, 1024).astype(np.uint16)
+    codes = np.full((h, w, 3), 511, dtype=np.uint16)
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "dxo.dng")
+        _write_linear_dng_libraw_cant_read(path, h, w, codes, table)
+        with (
+            patch.object(tifffile.TiffPage, "asarray", side_effect=AssertionError("full array decoded")),
+            patch("negpy.infrastructure.loaders.rawpy_loader.rawpy.imread") as imread,
+        ):
+            ctx_mgr, metadata = LoaderFactory().get_loader(path, preview_max_edge=6)
+
+    imread.assert_not_called()
+    assert isinstance(ctx_mgr, NonStandardFileWrapper)
+    assert ctx_mgr.data.shape == (6, 5, 3)
+    assert (ctx_mgr.sizes.raw_height, ctx_mgr.sizes.raw_width) == (h, w)
+    assert metadata["ir"] is None
+    linear = float(table[511])
+    expected = np.clip((linear - np.array([0.0, 256.0, 0.0])) / (65535.0 - np.array([0.0, 256.0, 0.0])), 0.0, 1.0)
+    np.testing.assert_allclose(ctx_mgr.data[0, 0], expected, atol=1e-5)
+
+
+def test_jxl_linear_dng_preview_does_not_fall_back_when_a_segment_is_too_large():
+    h, w = 12, 10
+    table = np.linspace(0, 65535, 1024).astype(np.uint16)
+    codes = np.full((h, w, 3), 511, dtype=np.uint16)
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "dxo.dng")
+        _write_linear_dng_libraw_cant_read(path, h, w, codes, table)
+        with (
+            patch("negpy.infrastructure.loaders.rawpy_loader._PREVIEW_SEGMENT_MAX_BYTES", 1),
+            patch.object(tifffile.TiffPage, "asarray", side_effect=AssertionError("full array decoded")),
+            patch("negpy.infrastructure.loaders.rawpy_loader.rawpy.imread") as imread,
+            pytest.raises(RuntimeError, match="preview memory limit"),
+        ):
+            LoaderFactory().get_loader(path, preview_max_edge=6)
+
+    imread.assert_not_called()
+
+
+def test_jxl_linear_dng_preview_honors_cancellation_before_decode():
+    h, w = 12, 10
+    table = np.linspace(0, 65535, 1024).astype(np.uint16)
+    codes = np.full((h, w, 3), 511, dtype=np.uint16)
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "dxo.dng")
+        _write_linear_dng_libraw_cant_read(path, h, w, codes, table)
+        with (
+            patch.object(tifffile.TiffPage, "asarray", side_effect=AssertionError("full array decoded")),
+            patch("negpy.infrastructure.loaders.rawpy_loader.rawpy.imread") as imread,
+            pytest.raises(InterruptedError, match="preview load cancelled"),
+        ):
+            LoaderFactory().get_loader(path, preview_max_edge=6, should_cancel=lambda: True)
+
+    imread.assert_not_called()
 
 
 def test_nonstandard_wrapper_applies_wb_gains_only_when_camera_wb_requested():
