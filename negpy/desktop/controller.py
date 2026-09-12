@@ -785,7 +785,7 @@ class AppController(QObject):
         self.generate_missing_thumbnails()
 
     def _on_thumbnail_progress(self, current: int, total: int, name: str) -> None:
-        self.set_status(f"Thumbnail {current}/{total}: {name}")
+        self.set_status(f"CREATING FILMSTRIP THUMBNAIL IN BACKGROUND {current}/{total}: {name}")
         self.status_progress_requested.emit(current, total)
 
     def _set_thumbnail(self, key: str, pil_img: Any) -> bool:

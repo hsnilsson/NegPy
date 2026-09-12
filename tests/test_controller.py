@@ -2252,6 +2252,14 @@ class TestDiscoveryProgressPopup(unittest.TestCase):
         self.controller._on_discovery_progress(2, 5, "x")
         self.assertEqual(progress, [(2, 5, "x")])
 
+    def test_thumbnail_progress_names_the_background_filmstrip_task(self):
+        messages = []
+        self.controller.status_message_requested.connect(lambda text, timeout: messages.append(text))
+
+        self.controller._on_thumbnail_progress(2, 5, "x.dng")
+
+        self.assertEqual(messages, ["CREATING FILMSTRIP THUMBNAIL IN BACKGROUND 2/5: x.dng"])
+
     def test_finished_closes_popup_before_thumbnails(self):
         order = []
         self.controller.batch_finished.connect(lambda: order.append("finished"))
