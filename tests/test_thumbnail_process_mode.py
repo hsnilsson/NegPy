@@ -104,10 +104,28 @@ class BatchRequest(unittest.TestCase):
         self.assertTrue(controller._thumbnails_paused_for_foreground)
         controller.generate_missing_thumbnails.assert_not_called()
 
+    def test_idle_continuation_starts_deferred_prefetch_before_thumbnails(self):
+        controller = MagicMock()
+        controller._thumbnails_paused_for_foreground = True
+        controller._foreground_preview_generation = None
+        controller._is_rendering = False
+        controller._pending_render_task = None
+        controller._active_batch = None
+        controller._neighbor_prefetch_generation = 3
+        controller._prefetch_gen = 3
+        controller._prefetch_in_flight_generation = None
+        controller._neighbor_prefetch_queue = []
+
+        AppController._continue_background_work(controller)
+
+        controller._schedule_prefetch_neighbors.assert_called_once_with()
+        controller.generate_missing_thumbnails.assert_not_called()
+
     def test_preview_load_error_does_not_clear_an_unrelated_render(self):
         controller = MagicMock()
         controller._foreground_preview_generation = 2
         controller._neighbor_prefetch_generation = 2
+        controller._neighbor_prefetch_queue = [object()]
         controller._is_rendering = True
 
         AppController._on_preview_load_error(controller, "decode failed")
@@ -115,6 +133,7 @@ class BatchRequest(unittest.TestCase):
         self.assertTrue(controller._is_rendering)
         self.assertIsNone(controller._foreground_preview_generation)
         self.assertIsNone(controller._neighbor_prefetch_generation)
+        self.assertEqual(controller._neighbor_prefetch_queue, [])
         controller.generate_missing_thumbnails.assert_not_called()
 
 

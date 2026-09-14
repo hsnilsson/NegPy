@@ -8,6 +8,7 @@ from negpy.infrastructure.loaders.fff_loader import FffLoader, is_flextight_fff
 from negpy.infrastructure.loaders.nef_loader import NefLoader, is_coolscan_nef
 from negpy.infrastructure.loaders.noritsu_loader import NoritsuLoader, is_noritsu_raw
 from negpy.infrastructure.loaders.jxl_loader import JxlLoader
+from negpy.infrastructure.loaders.memory import PreviewMemoryEstimate, estimate_preview_memory
 from negpy.infrastructure.loaders.rawpy_loader import RawpyLoader
 from negpy.infrastructure.loaders.constants import (
     SUPPORTED_TIFF_EXTENSIONS,
@@ -88,6 +89,17 @@ class LoaderFactory:
             fast_only=fast_only,
             should_cancel=should_cancel,
         )
+
+    def estimate_preview_memory(self, file_path: str, max_edge: int) -> PreviewMemoryEstimate:
+        """Estimate a loader's preview working set without decoding image pixels."""
+        loader = self._select_loader(file_path)
+        if loader is self._jpeg:
+            profile = "display"
+        elif loader in (self._rawpy, self._fff, self._jxl):
+            profile = "raw"
+        else:
+            profile = "scan"
+        return estimate_preview_memory(file_path, max_edge, profile)
 
 
 # Global instance for shared use

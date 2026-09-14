@@ -228,11 +228,20 @@ class RawpyLoader(IImageLoader):
             return NonStandardFileWrapper(rgb), metadata
 
         if _is_dng(file_path):
+            raw = None
             try:
                 raw = rawpy.imread(file_path)
+                if should_cancel is not None and should_cancel():
+                    raw.close()
+                    raise InterruptedError("preview load cancelled")
                 raw.unpack()  # force now: postprocess() would hit the same error later
+                if should_cancel is not None and should_cancel():
+                    raw.close()
+                    raise InterruptedError("preview load cancelled")
             except rawpy.LibRawError:
-                fallback = _peek_linear_dng_rgb(file_path)
+                if raw is not None:
+                    raw.close()
+                fallback = _peek_linear_dng_rgb(file_path) if preview_max_edge is None else None
                 if fallback is None:
                     raise
                 rgb, wb_gains = fallback
@@ -245,6 +254,9 @@ class RawpyLoader(IImageLoader):
                 return NonStandardFileWrapper(rgb, wb_gains=wb_gains), metadata
         else:
             raw = rawpy.imread(file_path)
+            if should_cancel is not None and should_cancel():
+                raw.close()
+                raise InterruptedError("preview load cancelled")
 
         metadata = {
             "orientation": read_orientation(file_path),

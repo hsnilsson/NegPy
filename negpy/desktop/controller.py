@@ -535,6 +535,8 @@ class AppController(QObject):
         self._requested_file_path: str = ""
         self._foreground_preview_generation: Optional[int] = None
         self._neighbor_prefetch_generation: Optional[int] = None
+        self._neighbor_prefetch_queue: list[PreviewLoadTask] = []
+        self._prefetch_in_flight_generation: Optional[int] = None
         self._thumbnail_queue_active = False
         self._thumbnails_paused_for_foreground = False
 
@@ -710,6 +712,7 @@ class AppController(QObject):
         self.preview_load_worker.vram_capped.connect(self._on_hq_preview_vram_capped)
         self.preview_load_worker.error.connect(self._on_preview_load_error)
         self.preview_load_worker.load_failed.connect(self._on_preview_load_failed)
+        self.preview_load_worker.prefetch_finished.connect(self._on_neighbor_prefetch_finished)
 
         self.scan_devices_requested.connect(self.scan_worker.list_devices)
         self.scan_backend_requested.connect(self.scan_worker.set_backend)
@@ -846,17 +849,33 @@ class AppController(QObject):
 
     def _continue_background_work(self) -> None:
         """Resume deferred work after the selected frame becomes idle."""
-        if (
-            getattr(self, "_foreground_preview_generation", None) is not None
-            or getattr(self, "_is_rendering", False)
-            or getattr(self, "_pending_render_task", None) is not None
-        ):
+        if AppController._foreground_work_active(self):
             return
         prefetch_generation = getattr(self, "_neighbor_prefetch_generation", None)
         if prefetch_generation is not None and prefetch_generation == getattr(self, "_prefetch_gen", None):
             self._neighbor_prefetch_generation = None
             self._schedule_prefetch_neighbors()
+            return
+        if getattr(self, "_prefetch_in_flight_generation", None) is not None or getattr(self, "_neighbor_prefetch_queue", []):
+            return
         AppController._resume_background_thumbnails(self)
+
+    def _foreground_work_active(self) -> bool:
+        return bool(
+            getattr(self, "_foreground_preview_generation", None) is not None
+            or getattr(self, "_is_rendering", False)
+            or getattr(self, "_pending_render_task", None) is not None
+            or getattr(self, "_active_batch", None) is not None
+        )
+
+    def _cancel_neighbor_prefetch(self) -> bool:
+        self._neighbor_prefetch_generation = None
+        self._neighbor_prefetch_queue.clear()
+        generation = self._prefetch_in_flight_generation
+        if generation is None:
+            return False
+        self.preview_load_worker.cancel_prefetch(generation)
+        return True
 
     # --- Batch progress popup -------------------------------------------------
 
@@ -1708,8 +1727,8 @@ class AppController(QObject):
         """
         self._prefetch_gen += 1
         self.preview_load_worker.expect_generation(self._prefetch_gen)
+        self._cancel_neighbor_prefetch()
         self._foreground_preview_generation = self._prefetch_gen
-        self._neighbor_prefetch_generation = None
         self._pause_background_thumbnails()
         self._preview_load_t0 = time.perf_counter()
         self._requested_file_path = file_path
@@ -1919,48 +1938,75 @@ class AppController(QObject):
         self._neighbor_prefetch_generation = self._prefetch_gen
 
     def _schedule_prefetch_neighbors(self) -> None:
-        from negpy.desktop.prefetch_logic import neighbor_paths_and_hashes
+        generation = self._prefetch_gen
+        QTimer.singleShot(50, lambda: self._prepare_neighbor_prefetch(generation))
 
-        g = self._prefetch_gen
+    def _prepare_neighbor_prefetch(self, generation: int) -> None:
+        from negpy.desktop.prefetch_logic import neighbor_assets
 
-        def _run() -> None:
-            if g != self._prefetch_gen:
-                return
-            idx = self.state.selected_file_idx
-            files = self.state.uploaded_files
-            if idx < 0 or not files:
-                return
-            display_order = self.session.asset_model.visible_actual_indices_ordered()
-            for path, h in neighbor_paths_and_hashes(files, display_order, idx):
-                # Match the cache key load_file will use for this neighbour: its own saved
-                # linear_raw, not the current file's. Otherwise the warm buffer lands under
-                # the wrong key and navigation re-decodes anyway.
-                saved = self.session.repo.load_file_settings(h) if h else None
-                # effective_, so the key matches what load_file will decode. A neighbour
-                # with no saved edit resolves False here, because its mode is unknown
-                # without hydrating it. That is the same miss as before, not a new one.
-                linear_raw = effective_linear_raw(saved.process, saved.exposure.render_intent) if saved else False
-                neighbour_half = self._half_slice_for_asset(path, h)
-                self.preview_load_requested.emit(
-                    PreviewLoadTask(
-                        file_path=path,
-                        workspace_color_space=self.state.workspace_color_space,
-                        use_camera_wb=not linear_raw,
-                        positive_source=saved.process.positive_source if saved else False,
-                        # Half-size only: a full-res HQ neighbour evicts the active buffer.
-                        # The cache key separates resolutions.
-                        full_resolution=False,
-                        file_hash=h,
-                        use_splash=False,
-                        for_cache_warm=True,
-                        half_slice=neighbour_half,
-                        # Falls back to the open frame's value, which is what sticky hands an
-                        # unedited neighbour. Warming the other key would decode twice.
-                        demosaic=saved.process.demosaic_preview if saved else self.state.config.process.demosaic_preview,
-                    )
-                )
+        if generation != self._prefetch_gen or self._foreground_work_active():
+            return
+        index = self.state.selected_file_idx
+        files = self.state.uploaded_files
+        if index < 0 or not files:
+            AppController._resume_background_thumbnails(self)
+            return
 
-        QTimer.singleShot(50, _run)
+        display_order = self.session.asset_model.visible_actual_indices_ordered()
+        tasks = [self._neighbor_prefetch_task(asset, generation) for asset in neighbor_assets(files, display_order, index)]
+        self._neighbor_prefetch_queue = [task for task in tasks if task is not None]
+        self._start_next_neighbor_prefetch()
+
+    def _neighbor_prefetch_task(self, asset: dict, generation: int) -> Optional[PreviewLoadTask]:
+        if is_composite(asset):
+            return None
+        file_hash = asset.get("hash")
+        if not file_hash:
+            return None
+        saved = self.session.repo.load_file_settings(file_hash)
+        linear_raw = effective_linear_raw(saved.process, saved.exposure.render_intent) if saved else False
+        try:
+            integrated_gpu = bool(self.state.gpu_enabled and GPUDevice.get().is_integrated)
+        except Exception:
+            integrated_gpu = False
+        return PreviewLoadTask(
+            file_path=asset["path"],
+            workspace_color_space=self.state.workspace_color_space,
+            use_camera_wb=not linear_raw,
+            generation=generation,
+            positive_source=saved.process.positive_source if saved else False,
+            full_resolution=False,
+            file_hash=file_hash,
+            use_splash=False,
+            for_cache_warm=True,
+            integrated_gpu=integrated_gpu,
+            half_slice=self._half_slice_for_asset(asset["path"], file_hash),
+            demosaic=saved.process.demosaic_preview if saved else self.state.config.process.demosaic_preview,
+        )
+
+    def _start_next_neighbor_prefetch(self) -> None:
+        if self._foreground_work_active():
+            return
+        if self._prefetch_in_flight_generation is not None:
+            return
+        if not self._neighbor_prefetch_queue:
+            AppController._resume_background_thumbnails(self)
+            return
+        task = self._neighbor_prefetch_queue.pop(0)
+        self._prefetch_in_flight_generation = task.generation
+        self.preview_load_requested.emit(task)
+
+    def _on_neighbor_prefetch_finished(self, generation: int, _file_path: str) -> None:
+        if self._prefetch_in_flight_generation == generation:
+            self._prefetch_in_flight_generation = None
+        if generation != self._prefetch_gen:
+            return
+        if self._pending_render_task is not None and not self._is_rendering and self._foreground_preview_generation is None:
+            self._dispatch_pending_render()
+            return
+        if self._foreground_work_active():
+            return
+        self._start_next_neighbor_prefetch()
 
     def _apply_detected_mode(self, detected_mode: str) -> None:
         """
@@ -4189,7 +4235,13 @@ class AppController(QObject):
             gutter_thickness=dip[0]["gutter_thickness"] if dip is not None else 0.0,
         )
 
+        prefetch_was_running = self._cancel_neighbor_prefetch()
+
         if self._is_rendering:
+            self._pending_render_task = task
+            return
+
+        if prefetch_was_running:
             self._pending_render_task = task
             return
 
@@ -5496,6 +5548,7 @@ class AppController(QObject):
     def _on_preview_load_error(self, message: str) -> None:
         self._foreground_preview_generation = None
         self._neighbor_prefetch_generation = None
+        self._neighbor_prefetch_queue.clear()
         logger.error(f"Preview load failure: {message}")
         self.set_status(f"Failed to load file: {message}", 5000, kind="error")
         self.load_failed.emit()

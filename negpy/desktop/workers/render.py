@@ -196,6 +196,7 @@ class PreviewLoadTask:
     file_hash: str | None = None
     use_splash: bool = True
     for_cache_warm: bool = False
+    integrated_gpu: bool = False
     detect_mode: bool = False  # run process-mode autodetect (new files only)
     # The assembly configs travel whole rather than flattened into loose fields. They are
     # frozen and hashable, the worker rebuilt them from the pieces anyway, and a new field on
@@ -980,29 +981,71 @@ class PreviewLoadWorker(QObject):
     vram_capped = pyqtSignal(str, int)
     # (file_path, message): the error carries no path, so badge attribution needs this
     load_failed = pyqtSignal(str, str)
+    prefetch_finished = pyqtSignal(int, str)
 
     def __init__(self, preview_service) -> None:
         super().__init__()
         self._preview_service = preview_service
         self._generation_lock = threading.Lock()
         self._latest_generation = 0
+        self._cancelled_prefetch_generations: set[int] = set()
 
     def expect_generation(self, generation: int) -> None:
         """Make older queued and segment-based preview work obsolete."""
         with self._generation_lock:
             self._latest_generation = generation
+            self._cancelled_prefetch_generations = {
+                cancelled for cancelled in self._cancelled_prefetch_generations if cancelled >= generation
+            }
+
+    def cancel_prefetch(self, generation: int) -> None:
+        """Cancel low-priority work without invalidating the selected frame."""
+        with self._generation_lock:
+            self._cancelled_prefetch_generations.add(generation)
 
     def _is_current(self, task: PreviewLoadTask) -> bool:
         with self._generation_lock:
             return task.generation == self._latest_generation
 
+    def _prefetch_is_current(self, task: PreviewLoadTask) -> bool:
+        with self._generation_lock:
+            return task.generation == self._latest_generation and task.generation not in self._cancelled_prefetch_generations
+
     @pyqtSlot(PreviewLoadTask)
     def process(self, task: PreviewLoadTask) -> None:
+        if task.for_cache_warm:
+            self._process_prefetch(task)
+            return
         if not self._is_current(task):
             return
         with _DECODE_MEMORY_GATE:
             if self._is_current(task):
                 self._process_locked(task)
+
+    def _process_prefetch(self, task: PreviewLoadTask) -> None:
+        try:
+            if not self._prefetch_is_current(task):
+                return
+            with _DECODE_MEMORY_GATE:
+                if not self._prefetch_is_current(task):
+                    return
+                self._preview_service.prefetch_linear_preview(
+                    task.file_path,
+                    task.workspace_color_space,
+                    use_camera_wb=task.use_camera_wb,
+                    file_hash=task.file_hash,
+                    half_slice=task.half_slice,
+                    demosaic=task.demosaic,
+                    positive_source=task.positive_source,
+                    integrated_gpu=task.integrated_gpu,
+                    should_cancel=lambda: not self._prefetch_is_current(task),
+                )
+        except InterruptedError:
+            pass
+        except Exception as error:
+            logger.debug("Preview cache warm failed for %s: %s", task.file_path, error)
+        finally:
+            self.prefetch_finished.emit(task.generation, task.file_path)
 
     def _process_locked(self, task: PreviewLoadTask) -> None:
         if not self._is_current(task):
@@ -1010,21 +1053,6 @@ class PreviewLoadWorker(QObject):
 
         def cancelled() -> bool:
             return not self._is_current(task)
-        if task.for_cache_warm:
-            try:
-                self._preview_service.load_linear_preview(
-                    task.file_path,
-                    task.workspace_color_space,
-                    use_camera_wb=task.use_camera_wb,
-                    full_resolution=task.full_resolution,
-                    file_hash=task.file_hash,
-                    half_slice=task.half_slice,
-                    demosaic=task.demosaic,
-                    positive_source=task.positive_source,
-                )
-            except Exception as e:
-                logger.debug("Preview cache warm failed for %s: %s", task.file_path, e)
-            return
         t0 = time.perf_counter()
         try:
             if stitch_active(task.stitch):

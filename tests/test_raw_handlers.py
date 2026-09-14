@@ -7,6 +7,7 @@ import rawpy
 import tifffile
 
 from negpy.infrastructure.loaders.factory import LoaderFactory
+from negpy.infrastructure.loaders.rawpy_loader import RawpyLoader
 from negpy.infrastructure.loaders.tiff_loader import NonStandardFileWrapper
 from negpy.features.process.models import DemosaicMode
 from negpy.infrastructure.loaders.helpers import get_best_demosaic_algorithm, is_xtrans, resolve_demosaic, supported_demosaic_modes
@@ -95,6 +96,20 @@ class TestRawHandlers(unittest.TestCase):
         wrapper = NonStandardFileWrapper(np.zeros((4, 4, 3), dtype=np.float32))
         _, wrapper_label = resolve_demosaic(wrapper, DemosaicMode.DHT)
         self.assertIsNone(wrapper_label)
+
+    def test_cancelled_dng_stops_after_native_unpack(self):
+        raw = unittest.mock.MagicMock()
+        cancelled = unittest.mock.MagicMock(side_effect=[False, True])
+
+        with (
+            patch("negpy.infrastructure.loaders.rawpy_loader._is_dng", return_value=True),
+            patch("negpy.infrastructure.loaders.rawpy_loader.rawpy.imread", return_value=raw),
+            pytest.raises(InterruptedError),
+        ):
+            RawpyLoader().load("large.dng", preview_max_edge=1600, should_cancel=cancelled)
+
+        raw.unpack.assert_called_once_with()
+        raw.close.assert_called_once_with()
 
 
 # --- 3-channel LinearRaw DNG libraw can't unpack (DxO PhotoLab/PureRAW, Lightroom

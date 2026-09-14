@@ -33,8 +33,10 @@ from negpy.features.rgbscan.models import RgbScanConfig
 from negpy.features.stitch.logic import stitch_composite
 from negpy.features.stitch.models import StitchConfig, stitch_token
 from negpy.kernel.system.logging import get_logger
+from negpy.kernel.system.memory import available_system_memory_bytes
 from negpy.features.process.models import DemosaicMode
 from negpy.services.rendering.preview_cache import PreviewBufferCache, PreviewCacheKey
+from negpy.services.rendering.prefetch_policy import decide_prefetch
 
 logger = get_logger(__name__)
 
@@ -82,6 +84,72 @@ class PreviewManager:
 
     def __init__(self) -> None:
         self._cache = PreviewBufferCache(APP_CONFIG)
+
+    def prefetch_linear_preview(
+        self,
+        file_path: str,
+        color_space: str,
+        *,
+        use_camera_wb: bool,
+        file_hash: str | None,
+        half_slice: tuple[int, float, tuple[float, float, float, float] | None, float] | None = None,
+        demosaic: str = DemosaicMode.AUTO,
+        positive_source: bool = False,
+        integrated_gpu: bool = False,
+        should_cancel: Optional[Callable[[], bool]] = None,
+    ) -> bool:
+        """Warm one preview when its cache and system-memory budgets both admit it."""
+        if not file_hash:
+            return False
+        key = PreviewCacheKey(
+            file_hash=file_hash,
+            use_camera_wb=use_camera_wb,
+            workspace_color_space=color_space,
+            full_resolution=False,
+            demosaic=demosaic,
+            half=half_slice[0] if half_slice else 0,
+            split_x=half_slice[1] if half_slice else 0.5,
+            crop_rect=half_slice[2] if half_slice else None,
+            gutter_thickness=half_slice[3] if half_slice else 0.0,
+            positive_source=positive_source,
+        )
+        if self._cache.contains(key):
+            return True
+        if should_cancel is not None and should_cancel():
+            raise InterruptedError("preview load cancelled")
+
+        estimate = loader_factory.estimate_preview_memory(file_path, APP_CONFIG.preview_render_size)
+        decision = decide_prefetch(
+            estimate,
+            self._cache.usage(),
+            available_system_memory_bytes(),
+            integrated_gpu=integrated_gpu,
+        )
+        if not decision.allowed:
+            logger.debug(
+                "preview prefetch skip: %s (cache=%d B temporary=%d B required_ram=%d B) %s",
+                decision.reason,
+                estimate.cached_bytes,
+                estimate.temporary_bytes,
+                decision.required_ram_bytes,
+                file_path,
+            )
+            return False
+        if should_cancel is not None and should_cancel():
+            raise InterruptedError("preview load cancelled")
+
+        self.load_linear_preview(
+            file_path,
+            color_space,
+            use_camera_wb=use_camera_wb,
+            full_resolution=False,
+            file_hash=file_hash,
+            half_slice=half_slice,
+            demosaic=demosaic,
+            positive_source=positive_source,
+            should_cancel=should_cancel,
+        )
+        return True
 
     # Internal helpers. They operate on an already-open raw object, so a caller that needs
     # both splash and linear shares one file open.
@@ -135,6 +203,7 @@ class PreviewManager:
         half_slice: tuple[int, float, tuple[float, float, float, float] | None, float] | None = None,
         demosaic: str = DemosaicMode.AUTO,
         positive_source: bool = False,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Tuple[ImageBuffer, Dimensions, dict]:
         """
         Decode and resize a linear preview from an already-open raw object.
@@ -147,6 +216,9 @@ class PreviewManager:
         """
         t_decode = time.perf_counter()
         log = logger.info if log_timings else logger.debug
+
+        if should_cancel is not None and should_cancel():
+            raise InterruptedError("preview load cancelled")
 
         # An explicit algorithm decodes full-size: libraw bins 2x2 quads for half_size and never
         # reaches the interpolator, so the fast path would ignore the choice.
@@ -187,6 +259,10 @@ class PreviewManager:
             **post_kw,
         )
         log("load-timing decode.postprocess %.0fms (fast=%s) %s", (time.perf_counter() - t_pp) * 1000, use_fast, file_path)
+        if should_cancel is not None and should_cancel():
+            if isinstance(raw, rawpy.RawPy):
+                raw.close()
+            raise InterruptedError("preview load cancelled")
         rgb = ensure_rgb(rgb)
 
         # A sensor-native decode (output_color=raw) leaves the buffer in camera primaries, and
@@ -196,11 +272,17 @@ class PreviewManager:
         metadata["cam_xyz"] = camera_xyz_matrix(raw)
         # Only needed when use_camera_wb is False; harmless otherwise.
         metadata["camera_wb"] = camera_wb_multipliers(raw)
+        if isinstance(raw, rawpy.RawPy):
+            raw.close()
+        if should_cancel is not None and should_cancel():
+            raise InterruptedError("preview load cancelled")
 
         # Bake EXIF orientation into the buffer (postprocess runs with user_flip=0).
         orientation = metadata.get("orientation", 1)
         full_linear = apply_exif_orientation(uint16_to_float32(np.ascontiguousarray(rgb)), orientation)
         del rgb  # release the uint16 decode buffer before the resize/copy peak
+        if should_cancel is not None and should_cancel():
+            raise InterruptedError("preview load cancelled")
         ir_full = metadata.get("ir")
         if ir_full is not None:
             ir_full = apply_exif_orientation(ir_full, orientation)
@@ -296,6 +378,8 @@ class PreviewManager:
             "load-timing decode.total %.0fms (demosaic+orient+resize)",
             (time.perf_counter() - t_decode) * 1000,
         )
+        if should_cancel is not None and should_cancel():
+            raise InterruptedError("preview load cancelled")
         if file_hash:
             ck = PreviewCacheKey(
                 file_hash=file_hash,
@@ -414,6 +498,7 @@ class PreviewManager:
                 half_slice=half_slice,
                 demosaic=demosaic,
                 positive_source=positive_source,
+                should_cancel=should_cancel,
             )
         log(
             "load-timing load_linear_preview %.0fms (decode %.0fms + open)",
@@ -724,6 +809,7 @@ class PreviewManager:
                 half_slice=half_slice,
                 demosaic=demosaic,
                 positive_source=positive_source,
+                should_cancel=should_cancel,
             )
         log(
             "load-timing load_splash_and_linear %.0fms (decode %.0fms + open)",
