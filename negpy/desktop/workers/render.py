@@ -404,6 +404,7 @@ class ThumbnailWorker(QObject):
     activity = pyqtSignal(str)
     # A completed frame enters the filmstrip before the next source starts.
     partial = pyqtSignal(dict)
+    started = pyqtSignal()
     # Rendered positives use their own signal, so the batch's bulk overwrite cannot clobber a
     # frame that already rendered on the canvas.
     rendered_finished = pyqtSignal(dict)
@@ -451,6 +452,7 @@ class ThumbnailWorker(QObject):
         if not self._active:
             self.activity.emit("")
             return
+        self.started.emit()
         timer.start(0)
 
     @pyqtSlot()
@@ -1178,6 +1180,8 @@ class PreviewLoadWorker(QObject):
                 metadata.get("detect_preview"),
             )
         except Exception as e:
+            if not self._is_current(task):
+                return
             logger.exception(f"Asset load failed: {task.file_path}")
             # libraw reports "Unsupported file format or not RAW file" for a file whose tags it
             # parsed perfectly and whose payload it cannot decode, which reads as "your NEF is

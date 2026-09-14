@@ -533,6 +533,9 @@ class AppController(QObject):
         self._spared_texture: Optional[GPUTexture] = None
         self._preview_load_t0 = 0.0
         self._requested_file_path: str = ""
+        self._foreground_preview_generation: Optional[int] = None
+        self._neighbor_prefetch_generation: Optional[int] = None
+        self._thumbnail_queue_active = False
         self._thumbnails_paused_for_foreground = False
 
         self._connect_signals()
@@ -673,6 +676,7 @@ class AppController(QObject):
         self.thumbnail_cancel_requested.connect(self.thumb_worker.cancel)
         self.thumb_worker.activity.connect(self.thumbnail_activity_changed)
         self.thumbnail_update_requested.connect(self.thumb_worker.update_rendered)
+        self.thumb_worker.started.connect(self._on_thumbnails_started)
         self.thumb_worker.partial.connect(self._apply_thumbnails)
         self.thumb_worker.rendered_finished.connect(self._on_rendered_thumbnail)
 
@@ -704,7 +708,7 @@ class AppController(QObject):
         self.preview_load_worker.splash.connect(self._on_splash_preview)
         self.preview_load_worker.finished.connect(self._on_preview_loaded)
         self.preview_load_worker.vram_capped.connect(self._on_hq_preview_vram_capped)
-        self.preview_load_worker.error.connect(self._on_render_error)
+        self.preview_load_worker.error.connect(self._on_preview_load_error)
         self.preview_load_worker.load_failed.connect(self._on_preview_load_failed)
 
         self.scan_devices_requested.connect(self.scan_worker.list_devices)
@@ -766,6 +770,7 @@ class AppController(QObject):
     def generate_missing_thumbnails(self) -> None:
         missing = [f for f in self.state.uploaded_files if asset_thumbnail_key(f) not in self.state.thumbnails]
         if missing:
+            self._thumbnail_queue_active = True
             self.thumb_worker.cancel_pending()
             # Copies, carrying each frame's stored film process. The source decode cannot
             # tell a slide from a negative reliably, and inverting a positive is what put
@@ -809,6 +814,8 @@ class AppController(QObject):
         self.session.asset_model.refresh()
         return broken
 
+    def _on_thumbnails_started(self) -> None:
+        self._thumbnail_queue_active = True
     def _on_rendered_thumbnail(self, new_thumbs: Dict[str, Any]) -> None:
         """A canvas render produced a thumbnail — it supersedes any batch placeholder."""
         for key, pil_img in new_thumbs.items():
@@ -819,8 +826,7 @@ class AppController(QObject):
 
     def _pause_background_thumbnails(self) -> None:
         """Give the selected frame exclusive access to native decode memory."""
-        missing = any(asset_thumbnail_key(f) not in self.state.thumbnails for f in self.state.uploaded_files)
-        if not missing:
+        if not self._thumbnail_queue_active:
             return
         self._thumbnails_paused_for_foreground = True
         self.thumb_worker.cancel_pending()
@@ -829,8 +835,28 @@ class AppController(QObject):
     def _resume_background_thumbnails(self) -> None:
         if not getattr(self, "_thumbnails_paused_for_foreground", False):
             return
+        if (
+            getattr(self, "_foreground_preview_generation", None) is not None
+            or getattr(self, "_is_rendering", False)
+            or getattr(self, "_pending_render_task", None) is not None
+        ):
+            return
         self._thumbnails_paused_for_foreground = False
         self.generate_missing_thumbnails()
+
+    def _continue_background_work(self) -> None:
+        """Resume deferred work after the selected frame becomes idle."""
+        if (
+            getattr(self, "_foreground_preview_generation", None) is not None
+            or getattr(self, "_is_rendering", False)
+            or getattr(self, "_pending_render_task", None) is not None
+        ):
+            return
+        prefetch_generation = getattr(self, "_neighbor_prefetch_generation", None)
+        if prefetch_generation is not None and prefetch_generation == getattr(self, "_prefetch_gen", None):
+            self._neighbor_prefetch_generation = None
+            self._schedule_prefetch_neighbors()
+        AppController._resume_background_thumbnails(self)
 
     # --- Batch progress popup -------------------------------------------------
 
@@ -1682,6 +1708,8 @@ class AppController(QObject):
         """
         self._prefetch_gen += 1
         self.preview_load_worker.expect_generation(self._prefetch_gen)
+        self._foreground_preview_generation = self._prefetch_gen
+        self._neighbor_prefetch_generation = None
         self._pause_background_thumbnails()
         self._preview_load_t0 = time.perf_counter()
         self._requested_file_path = file_path
@@ -1861,6 +1889,7 @@ class AppController(QObject):
                 self.session.asset_model.refresh()
         if self._requested_file_path != file_path:
             return
+        self._foreground_preview_generation = None
         logger.info(
             "load-timing preview_e2e %.0fms (load request -> decoded buffer) %s",
             (time.perf_counter() - self._preview_load_t0) * 1000,
@@ -1887,7 +1916,7 @@ class AppController(QObject):
         self.config_updated.emit()
         self._first_render_t0 = time.perf_counter()
         self.request_render()
-        self._schedule_prefetch_neighbors()
+        self._neighbor_prefetch_generation = self._prefetch_gen
 
     def _schedule_prefetch_neighbors(self) -> None:
         from negpy.desktop.prefetch_logic import neighbor_paths_and_hashes
@@ -5266,6 +5295,7 @@ class AppController(QObject):
         # The queue still drains — only the frame this render produced is unusable.
         if self._renders_another_frame(metrics):
             self._dispatch_pending_render()
+            AppController._continue_background_work(self)
             return
 
         # The baseline half of the split is stashed, never displayed: it must not reach
@@ -5279,6 +5309,7 @@ class AppController(QObject):
                 # The engine pool hands every render the same output texture, so this one
                 # has just overwritten the edit the canvas is sampling. Print it again.
                 self.request_render()
+            AppController._continue_background_work(self)
             return
 
         if self._first_render_t0 is not None and not metrics.get("ephemeral"):
@@ -5351,9 +5382,11 @@ class AppController(QObject):
         # the frame beside it; re-capture once the queue is empty.
         if self.state.compare_mode and self._pending_render_task is None and self.state.compare_before_key != self._compare_before_key():
             self._request_compare_baseline()
+            AppController._continue_background_work(self)
             return
 
         self._dispatch_pending_render()
+        AppController._continue_background_work(self)
 
     def _freeze_resolved_auto_crop(self, metrics: Dict[str, Any]) -> None:
         """Store the crop this render detected, so nothing detects it a second time.
@@ -5460,15 +5493,22 @@ class AppController(QObject):
             self._measured_half_rows.add(file_hash)
         return True
 
+    def _on_preview_load_error(self, message: str) -> None:
+        self._foreground_preview_generation = None
+        self._neighbor_prefetch_generation = None
+        logger.error(f"Preview load failure: {message}")
+        self.set_status(f"Failed to load file: {message}", 5000, kind="error")
+        self.load_failed.emit()
+        AppController._continue_background_work(self)
+
     def _on_render_error(self, message: str) -> None:
         self.state.is_processing = self._is_rendering = False
         self._busy_toast = False  # the failure message below replaces the toast
         logger.error(f"Render failure: {message}")
         self.set_status(f"Failed to load file: {message}", 5000, kind="error")
         self.load_failed.emit()
-        self._resume_background_thumbnails()
-
         self._dispatch_pending_render()
+        AppController._continue_background_work(self)
 
     def _on_export_task_error(self, message: str) -> None:
         self._export_failures += 1

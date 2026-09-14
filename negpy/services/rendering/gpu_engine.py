@@ -463,6 +463,8 @@ class GPUEngine:
         """True when a direct texture chain exceeds a device or working-set limit."""
         h, w = img.shape[:2]
         max_tex = self.gpu.limits.get("max_texture_dimension_2d", 8192)
+        if APP_CONFIG.max_texture_size is not None:
+            max_tex = min(max_tex, APP_CONFIG.max_texture_size)
         rot = settings.geometry.rotation % 4
         w_rot, h_rot = (h, w) if rot in (1, 3) else (w, h)
         return w_rot > max_tex or h_rot > max_tex or w * h > TILING_THRESHOLD_PX
