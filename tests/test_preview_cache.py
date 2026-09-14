@@ -47,6 +47,21 @@ def test_cache_skips_entry_larger_than_byte_cap() -> None:
     assert c.get(PreviewCacheKey("small", False, "Adobe RGB", False)) is not None
 
 
+def test_cache_usage_reports_remaining_entry_and_byte_budgets() -> None:
+    cfg = _small_cfg()
+    cfg.preview_cache_max_bytes = 1000
+    cache = PreviewBufferCache(cfg)
+    buffer = np.zeros((2, 2, 3), dtype=np.float32)
+    cache.put(PreviewCacheKey("one", False, "Adobe RGB", False), buffer, (2, 2), {})
+
+    usage = cache.usage()
+
+    assert usage.entries == 1
+    assert usage.bytes_used == buffer.nbytes
+    assert usage.entries_remaining == 1
+    assert usage.bytes_remaining == 1000 - buffer.nbytes
+
+
 def test_full_resolution_entries_respect_slot_budget() -> None:
     """Full-res (HQ) buffers beyond the slot budget evict oldest-first instead of
     pushing every small preview out through the byte cap."""
@@ -129,23 +144,37 @@ def test_cache_bypasses_second_postprocess() -> None:
         assert hit is not None and hit[0] is out
 
 
-def test_cache_warm_task_does_not_emit_finished() -> None:
-    """Prefetch jobs populate cache only — no `finished` to the UI path."""
-    pm = MagicMock()
-    pm.load_linear_preview.return_value = (MagicMock(), (1, 1), {})
-    w = PreviewLoadWorker(pm)
-    fin = MagicMock()
-    w.finished.connect(fin)
-    t = PreviewLoadTask(
-        file_path="/n.dng",
-        workspace_color_space="Adobe RGB",
-        use_camera_wb=False,
-        for_cache_warm=True,
-        file_hash="x",
+def test_navigation_cancels_prefetch_without_user_error() -> None:
+    service = MagicMock()
+    worker = PreviewLoadWorker(service)
+    errors = []
+    failures = []
+    completed = []
+    worker.error.connect(errors.append)
+    worker.load_failed.connect(lambda *args: failures.append(args))
+    worker.prefetch_finished.connect(lambda *args: completed.append(args))
+
+    def navigate(*_args, should_cancel, **_kwargs):
+        worker.expect_generation(2)
+        assert should_cancel()
+        raise InterruptedError("cancelled")
+
+    service.prefetch_linear_preview.side_effect = navigate
+    worker.expect_generation(1)
+    worker.process(
+        PreviewLoadTask(
+            file_path="/n.dng",
+            workspace_color_space="Adobe RGB",
+            use_camera_wb=False,
+            generation=1,
+            for_cache_warm=True,
+            file_hash="hash",
+        )
     )
-    w.process(t)
-    fin.assert_not_called()
-    pm.load_linear_preview.assert_called_once()
+
+    assert errors == []
+    assert failures == []
+    assert completed == [(1, "/n.dng")]
 
 
 def test_rgb_preview_cache_invalidates_when_companion_content_changes(tmp_path) -> None:

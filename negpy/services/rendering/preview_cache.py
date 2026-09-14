@@ -48,6 +48,14 @@ class _Entry:
     byte_size: int
 
 
+@dataclass(frozen=True)
+class PreviewCacheUsage:
+    entries: int
+    bytes_used: int
+    entries_remaining: int
+    bytes_remaining: int
+
+
 class PreviewBufferCache:
     """
     In-memory LRU for decoded linear preview buffers. Evicts by entry count and approximate RSS.
@@ -106,6 +114,21 @@ class PreviewBufferCache:
         with self._lock:
             self._order.clear()
             self._data.clear()
+
+    def contains(self, key: PreviewCacheKey) -> bool:
+        with self._lock:
+            return key.as_tuple() in self._data
+
+    def usage(self) -> PreviewCacheUsage:
+        with self._lock:
+            entries = len(self._data)
+            bytes_used = sum(entry.byte_size for entry in self._data.values())
+            return PreviewCacheUsage(
+                entries=entries,
+                bytes_used=bytes_used,
+                entries_remaining=max(0, self._app.preview_cache_max_entries - entries),
+                bytes_remaining=max(0, self._app.preview_cache_max_bytes - bytes_used),
+            )
 
     def _remove_key(self, t: Hashable) -> None:
         self._data.pop(t, None)
