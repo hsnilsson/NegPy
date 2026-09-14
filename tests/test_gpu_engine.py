@@ -318,6 +318,12 @@ class TestGpuTilingPolicy(unittest.TestCase):
         self.assertTrue(engine.requires_tiling(SimpleNamespace(shape=(900, 1100, 3)), settings))
         self.assertTrue(engine.requires_tiling(SimpleNamespace(shape=(1100, 900, 3)), rotated))
 
+    def test_configured_texture_cap_triggers_tiling(self):
+        engine = self._engine(max_texture=8192)
+
+        with patch("negpy.services.rendering.gpu_engine.APP_CONFIG.max_texture_size", 1024):
+            self.assertTrue(engine.requires_tiling(SimpleNamespace(shape=(900, 1100, 3)), WorkspaceConfig()))
+
     def test_releasing_pool_destroys_every_texture_except_retained(self):
         engine = GPUEngine.__new__(GPUEngine)
         kept = MagicMock()

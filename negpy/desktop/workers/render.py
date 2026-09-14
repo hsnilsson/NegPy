@@ -410,6 +410,7 @@ class ThumbnailWorker(QObject):
     # Chunks of the running batch, so a large folder fills its filmstrip as it goes instead of
     # staying blank until the last file lands.
     partial = pyqtSignal(dict)
+    started = pyqtSignal()
     # Rendered positives use their own signal, so the batch's bulk overwrite cannot clobber a
     # frame that already rendered on the canvas.
     rendered_finished = pyqtSignal(dict)
@@ -462,6 +463,7 @@ class ThumbnailWorker(QObject):
         if not self._active:
             self.finished.emit({})
             return
+        self.started.emit()
         timer.start(0)
 
     def _process_next(self) -> None:
@@ -1216,6 +1218,8 @@ class PreviewLoadWorker(QObject):
         except InterruptedError:
             return
         except Exception as e:
+            if not self._is_current(task):
+                return
             logger.exception(f"Asset load failed: {task.file_path}")
             # libraw reports "Unsupported file format or not RAW file" for a file whose tags it
             # parsed perfectly and whose payload it cannot decode, which reads as "your NEF is
