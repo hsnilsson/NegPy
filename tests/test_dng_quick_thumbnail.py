@@ -1,14 +1,15 @@
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import tifffile
 
-from negpy.infrastructure.loaders.helpers import NonStandardFileWrapper, _dng_tag_floats, dng_bounded_preview, dng_quick_preview
+from negpy.infrastructure.loaders.factory import LoaderFactory
+from negpy.infrastructure.loaders.helpers import _dng_tag_floats, dng_bounded_preview, dng_quick_preview
+from negpy.infrastructure.loaders.rawpy_loader import RawpyLoader
 from negpy.infrastructure.storage.local_asset_store import LocalAssetStore
 from negpy.services.assets.thumbnails import (
-    decode_background_source_image,
-    decode_source_image,
+    decode_bounded_source_preview,
     get_thumbnail_worker,
     thumbnail_cache_key,
 )
@@ -45,12 +46,16 @@ def test_reduced_dng_ifd_is_used_without_decoding_main_pixels(tmp_path):
 def test_full_resolution_only_dng_is_not_decoded_for_a_thumbnail(tmp_path):
     path = str(tmp_path / "main-only.dng")
     tifffile.imwrite(path, np.zeros((40, 60, 3), dtype=np.uint16), photometric=34892)
+    raw = Mock()
+    raw.__enter__ = Mock(return_value=raw)
+    raw.__exit__ = Mock(return_value=None)
+    raw.extract_thumb.side_effect = RuntimeError("no preview")
 
-    with patch("negpy.services.assets.thumbnails.loader_factory.get_loader") as loader:
-        result = decode_source_image(path, quick_only=True)
+    with patch("negpy.infrastructure.loaders.rawpy_loader.rawpy.imread", return_value=raw):
+        result = LoaderFactory().load_bounded_preview(path, 30, fast_only=True)
 
     assert result is None
-    loader.assert_not_called()
+    raw.postprocess.assert_not_called()
 
 
 def test_linear_dng_tiles_stream_into_a_bounded_preview(tmp_path):
@@ -78,32 +83,27 @@ def test_dng_rational_tags_are_converted_to_floats():
     np.testing.assert_allclose(_dng_tag_floats(tag), (0.5, 0.75, 0.0))
 
 
-def test_background_raw_without_a_bounded_decoder_keeps_placeholder():
+def test_thumbnail_service_uses_loader_contract_without_full_decode():
+    with patch("negpy.services.assets.thumbnails.loader_factory.load_bounded_preview", return_value=None) as bounded:
+        result = decode_bounded_source_preview("camera.arw", max_edge=64)
+
+    assert result is None
+    bounded.assert_called_once_with("camera.arw", 64, fast_only=False, should_cancel=None)
+
+
+def test_linear_dng_is_a_bounded_preview_implementation():
+    expected = Mock()
     with (
-        patch("negpy.services.assets.thumbnails.dng_bounded_preview", return_value=(False, None)) as bounded,
-        patch("negpy.services.assets.thumbnails.decode_source_image") as full_decode,
+        patch("negpy.infrastructure.loaders.rawpy_loader.dng_quick_preview", return_value=None),
+        patch("negpy.infrastructure.loaders.rawpy_loader.dng_bounded_preview", return_value=(True, expected)) as bounded,
     ):
-        dng_result = decode_background_source_image("camera.dng")
-        raw_result = decode_background_source_image("camera.arw")
+        result = RawpyLoader().load_bounded_preview("scanner.dng", 64)
 
-    assert dng_result is None
-    assert raw_result is None
-    assert bounded.call_count == 2
-    full_decode.assert_not_called()
+    assert result is expected
+    bounded.assert_called_once_with("scanner.dng", 64, should_cancel=None)
 
 
-def test_quick_thumbnail_uses_pixels_an_eager_loader_already_decoded():
-    with patch(
-        "negpy.services.assets.thumbnails.loader_factory.get_loader",
-        return_value=(NonStandardFileWrapper(np.full((8, 12, 3), 0.5, dtype=np.float32)), {"orientation": 1}),
-    ):
-        result = decode_source_image("scanner.raw", quick_only=True)
-
-    assert result is not None
-    assert result.size == (6, 4)
-
-
-def test_quick_thumbnail_does_not_demosaic_raw_without_embedded_preview():
+def test_bounded_preview_does_not_demosaic_raw_without_embedded_preview():
     class RawWithoutPreview:
         def __enter__(self):
             return self
@@ -115,13 +115,12 @@ def test_quick_thumbnail_does_not_demosaic_raw_without_embedded_preview():
             raise RuntimeError("no preview")
 
     with (
-        patch(
-            "negpy.services.assets.thumbnails.loader_factory.get_loader",
-            return_value=(RawWithoutPreview(), {"orientation": 1}),
-        ),
-        patch("negpy.services.assets.thumbnails._fast_demosaic") as demosaic,
+        patch("negpy.infrastructure.loaders.rawpy_loader.dng_quick_preview", return_value=None),
+        patch("negpy.infrastructure.loaders.rawpy_loader.dng_bounded_preview", return_value=(False, None)),
+        patch("negpy.infrastructure.loaders.rawpy_loader.rawpy.imread", return_value=RawWithoutPreview()),
+        patch.object(RawWithoutPreview, "postprocess", create=True) as demosaic,
     ):
-        result = decode_source_image("camera.raw", quick_only=True)
+        result = RawpyLoader().load_bounded_preview("camera.raw", 64)
 
     assert result is None
     demosaic.assert_not_called()
@@ -132,13 +131,11 @@ def test_fast_pass_defers_a_missing_preview_without_caching_failure(tmp_path):
     store = LocalAssetStore(str(tmp_path / "cache"), str(tmp_path / "icc"))
     store.initialize()
 
-    with (
-        patch("negpy.services.assets.thumbnails.decode_source_image", return_value=None),
-        patch("negpy.services.assets.thumbnails.dng_bounded_preview") as bounded,
-    ):
+    with patch("negpy.services.assets.thumbnails.decode_bounded_source_preview", return_value=None) as bounded:
         assert get_thumbnail_worker(path, "hash", store, fast_only=True) is None
 
-    bounded.assert_not_called()
+    bounded.assert_called_once()
+    assert bounded.call_args.kwargs["fast_only"] is True
     assert not store.has_thumbnail_miss(thumbnail_cache_key("hash", False))
 
 
@@ -147,12 +144,9 @@ def test_cancelled_slow_pass_does_not_cache_failure(tmp_path):
     store = LocalAssetStore(str(tmp_path / "cache"), str(tmp_path / "icc"))
     store.initialize()
 
-    with (
-        patch("negpy.services.assets.thumbnails.decode_source_image", return_value=None),
-        patch(
-            "negpy.services.assets.thumbnails.decode_background_source_image",
-            side_effect=InterruptedError("cancelled"),
-        ),
+    with patch(
+        "negpy.services.assets.thumbnails.decode_bounded_source_preview",
+        side_effect=InterruptedError("cancelled"),
     ):
         assert get_thumbnail_worker(path, "hash", store) is None
 
@@ -165,13 +159,9 @@ def test_missing_quick_preview_is_remembered(tmp_path):
     store = LocalAssetStore(str(tmp_path / "cache"), str(tmp_path / "icc"))
     store.initialize()
 
-    with (
-        patch("negpy.services.assets.thumbnails.decode_source_image", return_value=None) as decode,
-        patch("negpy.services.assets.thumbnails.dng_bounded_preview", return_value=(True, None)) as bounded,
-    ):
+    with patch("negpy.services.assets.thumbnails.decode_bounded_source_preview", return_value=None) as bounded:
         assert get_thumbnail_worker(path, "hash", store) is None
         assert get_thumbnail_worker(path, "hash", store) is None
 
-    assert decode.call_count == 1
     assert bounded.call_count == 1
     assert store.has_thumbnail_miss(thumbnail_cache_key("hash", False))

@@ -136,6 +136,9 @@ def _tiff_preview_page(file_path: str) -> Optional[Image.Image]:
             page = tif.pages[0]
             if not page.pages or page.dtype not in (np.uint8, np.uint16):  # type: ignore[union-attr]
                 return None
+            decoded_bytes = int(np.prod(page.shape)) * int(np.dtype(page.dtype).itemsize)
+            if decoded_bytes > _QUICK_PREVIEW_MAX_BYTES:
+                return None
             arr = page.asarray()  # type: ignore[attr-defined]
     except Exception as e:
         logger.warning(f"TIFF preview page read failed for {file_path}: {e}")
@@ -146,11 +149,25 @@ def _tiff_preview_page(file_path: str) -> Optional[Image.Image]:
     return Image.fromarray(ensure_rgb(arr))
 
 
-_DNG_QUICK_PREVIEW_MAX_BYTES = 64 * 1024 * 1024
+_QUICK_PREVIEW_MAX_BYTES = 64 * 1024 * 1024
 _DNG_STREAM_PREVIEW_MAX_BYTES = 64 * 1024 * 1024
 _DNG_STREAM_PREVIEW_TIMEOUT_S = 20.0
+_TIFF_STREAM_PREVIEW_MAX_BYTES = 64 * 1024 * 1024
+_TIFF_STREAM_PREVIEW_TIMEOUT_S = 20.0
 _DNG_LINEAR_RAW = 34892
 _DNG_CFA = 32803
+
+_linear_u16_levels = np.arange(65536, dtype=np.float32) / 65535.0
+_linear_u16_low = _linear_u16_levels < 0.018
+_linear_u16_levels[_linear_u16_low] *= 4.5
+_linear_u16_levels[~_linear_u16_low] = 1.099 * np.power(_linear_u16_levels[~_linear_u16_low], 1.0 / 2.222) - 0.099
+_LINEAR_U16_DISPLAY_LUT = np.clip(_linear_u16_levels * 255.0, 0, 255).astype(np.uint8)
+del _linear_u16_levels, _linear_u16_low
+
+
+def linear_uint16_to_display_uint8(values: np.ndarray) -> np.ndarray:
+    """Apply the loader display curve to linear uint16 preview samples."""
+    return _LINEAR_U16_DISPLAY_LUT[values]
 
 
 def _collect_dng_pages(tif: Any) -> list[Any]:
@@ -230,7 +247,7 @@ def dng_quick_preview(file_path: str) -> Optional[Image.Image]:
                 if photo == _DNG_CFA or (photo == _DNG_LINEAR_RAW and samples < 3):
                     continue
                 decoded_bytes = int(np.prod(shape)) * int(np.dtype(page.dtype).itemsize)
-                if decoded_bytes > _DNG_QUICK_PREVIEW_MAX_BYTES or page.dtype not in (np.uint8, np.uint16):
+                if decoded_bytes > _QUICK_PREVIEW_MAX_BYTES or page.dtype not in (np.uint8, np.uint16):
                     continue
                 long_edge = max(shape[:2])
                 below_target = int(long_edge < 256)
@@ -376,6 +393,79 @@ def dng_bounded_preview(
     except Exception as e:
         logger.warning(f"DNG bounded preview read failed for {file_path}: {e}")
         return handled, None
+
+
+def fit_bounded_preview(image: Image.Image, max_edge: int, orientation: int = 1) -> Image.Image:
+    """Return a loaded RGB preview with orientation and size applied."""
+    result = image.convert("RGB")
+    if orientation != 1:
+        result = Image.fromarray(apply_exif_orientation(np.asarray(result), orientation))
+    result.thumbnail((max(1, max_edge), max(1, max_edge)), Image.Resampling.LANCZOS)
+    return result.copy()
+
+
+def bounded_tiff_page_preview(
+    page: Any,
+    max_edge: int,
+    *,
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> Optional[Image.Image]:
+    """Stream a chunky grayscale or RGB TIFF page into a bounded preview."""
+    shape = tuple(int(value) for value in page.shape)
+    if len(shape) not in (2, 3) or (len(shape) == 3 and shape[2] not in (1, 3, 4)):
+        return None
+    if page.dtype not in (np.uint8, np.uint16) or int(getattr(page, "planarconfig", 1)) != 1:
+        return None
+
+    height, width = shape[:2]
+    samples = shape[2] if len(shape) == 3 else 1
+    itemsize = int(np.dtype(page.dtype).itemsize)
+    segment_height = int(page.tilelength if page.is_tiled else page.rowsperstrip or height)
+    segment_width = int(page.tilewidth if page.is_tiled else width)
+    if segment_height * segment_width * samples * itemsize > _TIFF_STREAM_PREVIEW_MAX_BYTES:
+        return None
+
+    scale = min(1.0, max(1, max_edge) / max(height, width))
+    out_height = max(1, int(round(height * scale)))
+    out_width = max(1, int(round(width * scale)))
+    output = np.zeros((out_height, out_width, 3), dtype=np.uint8)
+    deadline = time.monotonic() + _TIFF_STREAM_PREVIEW_TIMEOUT_S
+
+    for decoded, position, _shape in page.segments(maxworkers=1):
+        if should_cancel is not None and should_cancel():
+            raise InterruptedError("preview cancelled")
+        if time.monotonic() > deadline:
+            return None
+        if decoded is None:
+            continue
+        tile = decoded[0] if decoded.ndim == 4 else decoded
+        if tile.ndim == 2:
+            tile = tile[:, :, None]
+        if tile.ndim != 3 or tile.shape[2] not in (1, 3, 4):
+            return None
+        y, x = int(position[2]), int(position[3])
+        valid_height = min(tile.shape[0], height - y)
+        valid_width = min(tile.shape[1], width - x)
+        if valid_height <= 0 or valid_width <= 0:
+            continue
+        source = tile[:valid_height, :valid_width]
+        if source.dtype == np.uint16:
+            source = linear_uint16_to_display_uint8(source)
+        if source.shape[2] == 1:
+            source = np.repeat(source, 3, axis=2)
+        elif source.shape[2] == 4:
+            source = source[:, :, :3]
+
+        left = int(round(x * out_width / width))
+        top = int(round(y * out_height / height))
+        right = int(round((x + valid_width) * out_width / width))
+        bottom = int(round((y + valid_height) * out_height / height))
+        if right <= left or bottom <= top:
+            continue
+        small = Image.fromarray(source).resize((right - left, bottom - top), Image.Resampling.BOX)
+        output[top:bottom, left:right] = np.asarray(small)
+
+    return Image.fromarray(output)
 
 
 def embedded_preview(raw: Any, file_path: str) -> Optional[Image.Image]:

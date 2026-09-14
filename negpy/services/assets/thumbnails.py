@@ -1,4 +1,3 @@
-import os
 from typing import Any, Callable, Dict, Optional, Tuple
 from PIL import Image
 import rawpy
@@ -6,7 +5,7 @@ from negpy.kernel.system.config import APP_CONFIG
 import numpy as np
 from negpy.kernel.image.logic import apply_exif_orientation, ensure_rgb, float_to_uint8, prepare_thumbnail, srgb_to_linear, uint8_to_float32
 from negpy.infrastructure.loaders.factory import loader_factory
-from negpy.infrastructure.loaders.helpers import NonStandardFileWrapper, dng_bounded_preview, dng_quick_preview, embedded_preview
+from negpy.infrastructure.loaders.helpers import embedded_preview
 from negpy.infrastructure.display.color_spaces import WORKING_COLOR_SPACE
 from negpy.kernel.system.logging import get_logger
 
@@ -55,17 +54,15 @@ def _fast_demosaic(raw: Any) -> np.ndarray:
     )
 
 
-def _preview_from_loaded(raw: Any, file_path: str, quick_only: bool) -> Optional[Image.Image]:
-    """Use an embedded preview or pixels an eager non-rawpy loader already decoded."""
+def _preview_from_loaded(raw: Any, file_path: str) -> Image.Image:
+    """Use an embedded preview or decode pixels for an explicit source load."""
     img = embedded_preview(raw, file_path)
     if img is not None:
         return img
-    if quick_only and not isinstance(raw, NonStandardFileWrapper):
-        return None
     return Image.fromarray(_fast_demosaic(raw))
 
 
-def _decode_triplet_preview(red_path: str, green_path: str, blue_path: str, quick_only: bool = False) -> Optional[Image.Image]:
+def _decode_triplet_preview(red_path: str, green_path: str, blue_path: str) -> Image.Image:
     """Merge an RGB-scan triplet's three narrowband exposures into one preview.
 
     The red file's embedded thumbnail (and a lone decode of it) shows only the red
@@ -74,16 +71,9 @@ def _decode_triplet_preview(red_path: str, green_path: str, blue_path: str, quic
     from negpy.features.rgbscan.logic import assemble_rgb
 
     def _decode(path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
-        if quick_only and os.path.splitext(path)[1].lower() == ".dng":
-            img = dng_quick_preview(path)
-            if img is None:
-                raise ValueError("DNG has no quick preview")
-            return np.asarray(img.convert("RGB")), {"orientation": 1}
         ctx_mgr, metadata = loader_factory.get_loader(path)
         with ctx_mgr as raw:
-            img = _preview_from_loaded(raw, path, quick_only)
-            if img is None:
-                raise ValueError("RAW has no embedded preview")
+            img = _preview_from_loaded(raw, path)
             return np.asarray(img.convert("RGB")), metadata
 
     r, red_meta = _decode(red_path)
@@ -102,27 +92,16 @@ def decode_source_image(
     file_path: str,
     green_path: str = "",
     blue_path: str = "",
-    *,
-    quick_only: bool = False,
 ) -> Optional[Image.Image]:
-    """Small EXIF-oriented preview of a source file (embedded thumb, else fast decode).
+    """Decode an EXIF-oriented source image for an explicit image operation.
 
-    An RGB-scan triplet (green_path/blue_path given) is merged from its three
-    exposures so the thumbnail matches the canvas rather than showing red only."""
+    An RGB-scan triplet is merged from its three exposures."""
     if green_path and blue_path:
-        if quick_only:
-            return _decode_triplet_preview(file_path, green_path, blue_path, quick_only=True)
         return _decode_triplet_preview(file_path, green_path, blue_path)
-
-    ext = os.path.splitext(file_path)[1].lower()
-    if quick_only and ext == ".dng":
-        return dng_quick_preview(file_path)
 
     ctx_mgr, metadata = loader_factory.get_loader(file_path)
     with ctx_mgr as raw:
-        img = _preview_from_loaded(raw, file_path, quick_only)
-        if img is None:
-            return None
+        img = _preview_from_loaded(raw, file_path)
 
         orientation = metadata.get("orientation", 1)
         if orientation and orientation != 1:
@@ -131,25 +110,26 @@ def decode_source_image(
         return img
 
 
-def decode_background_source_image(
+def decode_bounded_source_preview(
     file_path: str,
     green_path: str = "",
     blue_path: str = "",
     *,
+    max_edge: int,
+    fast_only: bool = False,
     should_cancel: Optional[Callable[[], bool]] = None,
 ) -> Optional[Image.Image]:
-    """Decode a source missed by the quick pass without a full RAW demosaic."""
-    max_edge = APP_CONFIG.thumbnail_size * 2
+    """Load a source through its format loader's bounded-preview contract."""
 
     def decode_one(path: str) -> Optional[Image.Image]:
         if should_cancel is not None and should_cancel():
             raise InterruptedError("thumbnail cancelled")
-        handled, image = dng_bounded_preview(path, max_edge, should_cancel=should_cancel)
-        if not handled:
-            return None
-        if image is not None:
-            image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
-        return image
+        return loader_factory.load_bounded_preview(
+            path,
+            max_edge,
+            fast_only=fast_only,
+            should_cancel=should_cancel,
+        )
 
     if not green_path or not blue_path:
         return decode_one(file_path)
@@ -238,14 +218,14 @@ def get_thumbnail_worker(
         if callable(has_miss) and has_miss(cache_key) is True:
             return None
 
-        img = decode_source_image(file_path, green_path, blue_path, quick_only=True)
-        if img is None and not fast_only:
-            img = decode_background_source_image(
-                file_path,
-                green_path,
-                blue_path,
-                should_cancel=should_cancel,
-            )
+        img = decode_bounded_source_preview(
+            file_path,
+            green_path,
+            blue_path,
+            max_edge=ts * 2,
+            fast_only=fast_only,
+            should_cancel=should_cancel,
+        )
         if img is None:
             if not fast_only:
                 save_miss = getattr(asset_store, "save_thumbnail_miss", None) if asset_store else None
