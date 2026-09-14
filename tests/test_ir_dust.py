@@ -1008,6 +1008,29 @@ def test_downsample_ir_matches_across_preview_and_export():
     assert np.array_equal(export, preview)
 
 
+def test_downsample_ir_bounds_large_rgb_work_blocks(monkeypatch):
+    from negpy.features.retouch import logic
+
+    plane = np.full((240, 360, 3), 0.9, dtype=np.float32)
+    plane[100:104, 40:320] = 0.2
+    source_bytes = plane.nbytes
+    seen = []
+    erode = cv2.erode
+
+    def tracked(source, kernel):
+        seen.append(source.nbytes)
+        return erode(source, kernel)
+
+    monkeypatch.setattr(logic, "_IR_DOWNSAMPLE_WORK_BYTES", 32 * 1024)
+    monkeypatch.setattr(logic.cv2, "erode", tracked)
+    result = logic.downsample_ir(plane, 90)
+
+    assert result.shape == (60, 90, 3)
+    assert len(seen) > 1
+    assert max(seen) < source_bytes
+    assert np.isfinite(result).all()
+
+
 def _noisy_frame(h: int, w: int, seed: int = 0) -> np.ndarray:
     rng = np.random.default_rng(seed)
     return np.clip(rng.normal(0.5, 0.15, (h, w, 3)), 0, 1).astype(np.float32)
