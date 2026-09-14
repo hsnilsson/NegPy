@@ -28,6 +28,10 @@ from negpy.services.rendering.image_processor import ImageProcessor
 
 logger = get_logger(__name__)
 
+# Native codec buffers for the selected frame and filmstrip must not overlap.
+# The automatic thumbnail path stays bounded inside this gate.
+_DECODE_MEMORY_GATE = threading.Lock()
+
 
 @dataclass(frozen=True)
 class RenderTask:
@@ -422,9 +426,15 @@ class ThumbnailWorker(QObject):
         self._active = False
         self._slow_phase = False
         self._cancel_requested = threading.Event()
-        self._next_timer = QTimer(self)
-        self._next_timer.setSingleShot(True)
-        self._next_timer.timeout.connect(self._process_next)
+        self._next_timer: Optional[QTimer] = None
+
+    def _timer(self) -> QTimer:
+        """Create the scheduler in the worker's current Qt thread."""
+        if self._next_timer is None:
+            self._next_timer = QTimer(self)
+            self._next_timer.setSingleShot(True)
+            self._next_timer.timeout.connect(self._process_next)
+        return self._next_timer
 
     def cancel_pending(self) -> None:
         """Stop after the native call in progress returns."""
@@ -439,7 +449,8 @@ class ThumbnailWorker(QObject):
     @pyqtSlot(list)
     def generate(self, files: list) -> None:
         """Replace the low-priority queue and yield between every source file."""
-        self._next_timer.stop()
+        timer = self._timer()
+        timer.stop()
         self._cancel_requested.clear()
         self._files = list(files)
         self._slow_files = []
@@ -451,7 +462,7 @@ class ThumbnailWorker(QObject):
         if not self._active:
             self.finished.emit({})
             return
-        self._next_timer.start(0)
+        timer.start(0)
 
     def _process_next(self) -> None:
         if not self._active or self._cancel_requested.is_set():
@@ -462,20 +473,21 @@ class ThumbnailWorker(QObject):
 
         f_info = self._files[self._current]
         try:
-            thumb = get_thumbnail_worker(
-                f_info["path"],
-                f_info["hash"],
-                self._store,
-                int(f_info.get("half") or 0),
-                float(f_info.get("split_x") or 0.5),
-                f_info.get("green_path") or "",
-                f_info.get("blue_path") or "",
-                tuple(f_info["crop_rect"]) if f_info.get("crop_rect") else None,
-                float(f_info.get("gutter_thickness") or 0.0),
-                str(f_info.get("process_mode") or ""),
-                fast_only=not self._slow_phase,
-                should_cancel=self._cancel_requested.is_set,
-            )
+            with _DECODE_MEMORY_GATE:
+                thumb = get_thumbnail_worker(
+                    f_info["path"],
+                    f_info["hash"],
+                    self._store,
+                    int(f_info.get("half") or 0),
+                    float(f_info.get("split_x") or 0.5),
+                    f_info.get("green_path") or "",
+                    f_info.get("blue_path") or "",
+                    tuple(f_info["crop_rect"]) if f_info.get("crop_rect") else None,
+                    float(f_info.get("gutter_thickness") or 0.0),
+                    str(f_info.get("process_mode") or ""),
+                    fast_only=not self._slow_phase,
+                    should_cancel=self._cancel_requested.is_set,
+                )
             if thumb is not None:
                 key = asset_thumbnail_key(f_info)
                 self._pending[key] = thumb
@@ -500,16 +512,17 @@ class ThumbnailWorker(QObject):
                 self._current = 0
                 self._total = len(self._files)
                 self._slow_phase = True
-                self._next_timer.start(0)
+                self._timer().start(0)
                 return
             self._finish()
             return
-        self._next_timer.start(0)
+        self._timer().start(0)
 
     def _finish(self) -> None:
         if not self._active:
             return
-        self._next_timer.stop()
+        if self._next_timer is not None:
+            self._next_timer.stop()
         self._active = False
         results = self._pending
         self._files = []
@@ -1000,6 +1013,13 @@ class PreviewLoadWorker(QObject):
 
     @pyqtSlot(PreviewLoadTask)
     def process(self, task: PreviewLoadTask) -> None:
+        if not self._is_current(task):
+            return
+        with _DECODE_MEMORY_GATE:
+            if self._is_current(task):
+                self._process_locked(task)
+
+    def _process_locked(self, task: PreviewLoadTask) -> None:
         if not self._is_current(task):
             return
 

@@ -54,6 +54,27 @@ class BatchRequest(unittest.TestCase):
 
         controller._begin_batch.assert_not_called()
 
+    def test_foreground_load_cancels_a_running_thumbnail_queue(self):
+        controller = _controller({})
+        controller.thumb_worker = MagicMock()
+        controller.thumbnail_cancel_requested = MagicMock()
+        controller._thumbnails_paused_for_foreground = False
+
+        AppController._pause_background_thumbnails(controller)
+
+        self.assertTrue(controller._thumbnails_paused_for_foreground)
+        controller.thumb_worker.cancel_pending.assert_called_once()
+        controller.thumbnail_cancel_requested.emit.assert_called_once()
+
+    def test_rendered_active_thumbnail_resumes_the_background_queue(self):
+        controller = MagicMock()
+        controller._thumbnails_paused_for_foreground = True
+
+        AppController._resume_background_thumbnails(controller)
+
+        self.assertFalse(controller._thumbnails_paused_for_foreground)
+        controller.generate_missing_thumbnails.assert_called_once()
+
 
 class StoredMode(unittest.TestCase):
     def test_a_composite_uses_the_mode_it_inherited(self):

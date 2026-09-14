@@ -532,6 +532,7 @@ class AppController(QObject):
         self._spared_texture: Optional[GPUTexture] = None
         self._preview_load_t0 = 0.0
         self._requested_file_path: str = ""
+        self._thumbnails_paused_for_foreground = False
 
         self._connect_signals()
 
@@ -823,6 +824,22 @@ class AppController(QObject):
             if pil_img and self._set_thumbnail(key, pil_img):
                 self.state.rendered_thumbnails.add(key)
         self.session.asset_model.refresh()
+        self._resume_background_thumbnails()
+
+    def _pause_background_thumbnails(self) -> None:
+        """Give the selected frame exclusive access to native decode memory."""
+        missing = any(asset_thumbnail_key(f) not in self.state.thumbnails for f in self.state.uploaded_files)
+        if not missing:
+            return
+        self._thumbnails_paused_for_foreground = True
+        self.thumb_worker.cancel_pending()
+        self.thumbnail_cancel_requested.emit()
+
+    def _resume_background_thumbnails(self) -> None:
+        if not getattr(self, "_thumbnails_paused_for_foreground", False):
+            return
+        self._thumbnails_paused_for_foreground = False
+        self.generate_missing_thumbnails()
 
     # --- Batch progress popup -------------------------------------------------
 
@@ -1677,6 +1694,7 @@ class AppController(QObject):
         """
         self._prefetch_gen += 1
         self.preview_load_worker.expect_generation(self._prefetch_gen)
+        self._pause_background_thumbnails()
         self._preview_load_t0 = time.perf_counter()
         self._requested_file_path = file_path
         # A strip belongs to one frame, and the memo fast path below repaints without
@@ -4113,7 +4131,8 @@ class AppController(QObject):
         interactive = not readback_metrics and not compare_capture
         ir_buffer = self.state.preview_ir
         detect_buffer = self.state.preview_detect
-        if interactive and self.state.preview_proxy is not None:
+        crop_preview_full = self.state.active_tool in (ToolMode.CROP_MANUAL, ToolMode.ANALYSIS_DRAW)
+        if (interactive or crop_preview_full) and self.state.preview_proxy is not None:
             preview_raw = self.state.preview_proxy
             # The IR and detection planes must follow the image they are read against.
             ir_buffer = self.state.preview_ir_proxy
@@ -4123,7 +4142,6 @@ class AppController(QObject):
         if self.state.hq_preview:
             target_size = float(max(preview_raw.shape[:2]))
 
-        crop_preview_full = self.state.active_tool in (ToolMode.CROP_MANUAL, ToolMode.ANALYSIS_DRAW)
         # Only a plain render of the saved edit is reproducible on navigate-back. Overrides,
         # splash and tool previews are not memoized. Interactive frames are excluded: a proxy
         # render filed under the full-resolution key would be painted back as the real one.
@@ -5462,6 +5480,7 @@ class AppController(QObject):
         logger.error(f"Render failure: {message}")
         self.set_status(f"Failed to load file: {message}", 5000, kind="error")
         self.load_failed.emit()
+        self._resume_background_thumbnails()
 
         self._dispatch_pending_render()
 

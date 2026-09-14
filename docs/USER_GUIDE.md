@@ -223,7 +223,7 @@ Narrow the panel and the toolbar buttons that no longer fit move into a **»** m
 
 ### Triage (culling the roll)
 
-Thumbnails are positives from the start. Each format loader can supply a size-limited preview, first from a quick source and then from a slower bounded source in the background. A frame you have not opened yet is inverted from that preview, a quick per-channel job rather than the full pipeline, so the sheet reads as photographs while you cull. The automatic thumbnail path never runs a full camera RAW demosaic. A neutral square remains when a loader cannot make a preview within its limits. A LinearRaw DNG with JPEG XL compression is one implementation: its loader reads the image in bounded segments. Open the frame and its thumbnail is replaced by the real render, matching the canvas exactly. Transparencies are left alone, being positives already: a frame whose film process you have already set, or that you have opened once, is taken at its word, and only a frame nothing has decided yet is guessed at from its preview.
+Thumbnails are positives from the start. Each format loader can supply a size-limited preview, first from a quick source and then from a slower bounded source in the background. A frame you have not opened yet is inverted from that preview, a quick per-channel job rather than the full pipeline, so the sheet reads as photographs while you cull. The automatic thumbnail path never runs a full camera RAW demosaic, and it pauses while the selected frame decodes and renders. A neutral square remains when a loader cannot make a preview within its limits. A LinearRaw DNG with JPEG XL compression is one implementation: its loader reads the image in bounded segments. Open the frame and its thumbnail is replaced by the real render, matching the canvas exactly. Transparencies are left alone, being positives already: a frame whose film process you have already set, or that you have opened once, is taken at its word, and only a frame nothing has decided yet is guessed at from its preview.
 
 Right-click a thumbnail, or use keyboard shortcuts, to mark frames while you review the sheet:
 
@@ -1038,7 +1038,7 @@ Settings for the whole application, not for one photo. Open them from the canvas
 *   **Preview cache** and **Preview cache limit**: how many recently-viewed photos stay decoded in memory, and the memory ceiling for them. Lower both on a machine with little RAM.
 *   **HQ buffers**: full-resolution HQ preview buffers kept in memory. Each is large (a 60 MP scan is about 700 MB), and keeping the previous frame makes going back instant.
 *   **Rendered frames**: rendered frames held for navigating back with no re-render.
-*   **GPU texture cap**: largest GPU texture dimension, including HQ preview loads. 0 lets the hardware decide, except on an integrated GPU, where a conservative default applies automatically to avoid a VRAM crash; set it to 4096 if exports run the card out of memory.
+*   **GPU texture cap**: largest GPU texture dimension, including HQ preview loads. 0 lets the hardware decide, except on an integrated GPU, where a conservative default applies automatically. A large canvas render is tiled when its complete texture chain exceeds the direct-render budget; set a lower cap if exports still run the card out of memory.
 
 Every row from **Preview size** down is read at startup, so a change needs a restart. A value set in `override.toml` wins over these, and its row is grayed out and says so.
 
