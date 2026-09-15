@@ -120,8 +120,8 @@ class PreviewManager:
         if should_cancel is not None and should_cancel():
             raise InterruptedError("preview load cancelled")
 
-        estimate = loader_factory.estimate_preview_memory(file_path, APP_CONFIG.preview_render_size)
-        if not loader_factory.allows_linear_preview_prefetch(file_path, estimate):
+        estimate = loader_factory.estimate_linear_preview_prefetch_memory(file_path, APP_CONFIG.preview_render_size)
+        if estimate is None:
             logger.debug("preview prefetch skip: loader path is not responsive enough %s", file_path)
             return False
 

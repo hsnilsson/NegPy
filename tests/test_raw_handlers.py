@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -9,7 +10,9 @@ import rawpy
 import tifffile
 
 from negpy.infrastructure.loaders.factory import LoaderFactory
-from negpy.infrastructure.loaders.rawpy_loader import RawpyLoader
+from negpy.infrastructure.loaders.rawpy_loader import RawpyLoader, _streaming_linearraw_memory_estimate
+from negpy.services.rendering.prefetch_policy import decide_prefetch
+from negpy.services.rendering.preview_cache import PreviewCacheUsage
 from negpy.infrastructure.loaders.tiff_loader import NonStandardFileWrapper
 from negpy.features.process.models import DemosaicMode
 from negpy.infrastructure.loaders.helpers import get_best_demosaic_algorithm, is_xtrans, resolve_demosaic, supported_demosaic_modes
@@ -227,8 +230,7 @@ def test_jxl_linear_dng_allows_cancellable_neighbor_prefetch():
         _write_linear_dng_libraw_cant_read(path, h, w, codes, table)
 
         factory = LoaderFactory()
-        estimate = factory.estimate_preview_memory(path, 1600)
-        assert factory.allows_linear_preview_prefetch(path, estimate)
+        assert factory.estimate_linear_preview_prefetch_memory(path, 1600) is not None
 
 
 def test_libraw_dng_does_not_allow_non_cancellable_neighbor_prefetch():
@@ -237,8 +239,46 @@ def test_libraw_dng_does_not_allow_non_cancellable_neighbor_prefetch():
         _write_minimal_linearraw_dng(path, 12, 10)
 
         factory = LoaderFactory()
-        estimate = factory.estimate_preview_memory(path, 1600)
-        assert not factory.allows_linear_preview_prefetch(path, estimate)
+        assert factory.estimate_linear_preview_prefetch_memory(path, 1600) is None
+
+
+def test_large_segmented_linearraw_uses_bounded_memory_estimate():
+    width, height = 19_200, 12_752
+    page = SimpleNamespace(
+        shape=(height, width, 3),
+        dtype=np.dtype(np.uint16),
+        is_tiled=True,
+        tilelength=512,
+        tilewidth=512,
+        rowsperstrip=None,
+        tags={},
+    )
+    estimate = _streaming_linearraw_memory_estimate(page, page, 1600, normalize_tags=True)
+
+    assert estimate is not None
+    assert estimate.source_dimensions == (width, height)
+    decision = decide_prefetch(
+        estimate,
+        PreviewCacheUsage(0, 0, 1, 512 * 1024 * 1024, 0, 0),
+        2 * 1024 * 1024 * 1024,
+        integrated_gpu=False,
+    )
+    assert decision.allowed
+
+
+def test_large_non_segmented_linearraw_has_no_bounded_memory_estimate():
+    width, height = 19_200, 12_752
+    page = SimpleNamespace(
+        shape=(height, width, 3),
+        dtype=np.dtype(np.uint16),
+        is_tiled=False,
+        tilelength=None,
+        tilewidth=None,
+        rowsperstrip=height,
+        tags={},
+    )
+
+    assert _streaming_linearraw_memory_estimate(page, page, 1600, normalize_tags=True) is None
 
 
 def test_jxl_linear_dng_preview_does_not_fall_back_when_a_segment_is_too_large():

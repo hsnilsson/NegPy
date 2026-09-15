@@ -5,7 +5,6 @@ import tifffile
 from PIL import Image
 
 from negpy.infrastructure.loaders.factory import LoaderFactory
-from negpy.infrastructure.loaders.memory import PreviewMemoryEstimate
 from negpy.infrastructure.loaders.jpeg_loader import JpegLoader
 from negpy.infrastructure.loaders.tiff_loader import TiffLoader
 
@@ -66,12 +65,12 @@ def test_small_non_libraw_loaders_allow_neighbor_prefetch(tmp_path):
     factory = LoaderFactory()
 
     for path in (jpeg_path, tiff_path):
-        estimate = factory.estimate_preview_memory(path, 1600)
-        assert factory.allows_linear_preview_prefetch(path, estimate)
+        assert factory.estimate_linear_preview_prefetch_memory(path, 1600) is not None
 
 
 def test_large_non_cooperative_loader_does_not_allow_neighbor_prefetch():
     factory = LoaderFactory()
-    estimate = PreviewMemoryEstimate(16 * 1024 * 1024, 256 * 1024 * 1024 + 1, (10_000, 10_000))
 
-    assert not factory.allows_linear_preview_prefetch("large.tif", estimate)
+    with patch.object(factory, "estimate_preview_memory") as estimate:
+        estimate.return_value.temporary_bytes = 256 * 1024 * 1024 + 1
+        assert factory.estimate_linear_preview_prefetch_memory("large.tif", 1600) is None

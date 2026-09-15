@@ -18,6 +18,7 @@ from negpy.infrastructure.loaders.helpers import (
     read_orientation,
 )
 from negpy.infrastructure.loaders.ir_planes import find_ir_plane
+from negpy.infrastructure.loaders.memory import PreviewMemoryEstimate
 from negpy.kernel.system.logging import get_logger
 
 logger = get_logger(__name__)
@@ -27,6 +28,8 @@ _LINEAR_RAW = 34892
 _JPEG_XL_COMPRESSIONS = {50002, 52546}
 _PREVIEW_SEGMENT_MAX_BYTES = 64 * 1024 * 1024
 _EMBEDDED_PREVIEW_MAX_BYTES = 64 * 1024 * 1024
+_NORMALIZED_SEGMENT_WORKING_MULTIPLIER = 16
+_CONVERTED_SEGMENT_WORKING_MULTIPLIER = 6
 
 
 def _find_linearraw_page(tif: "tifffile.TiffFile", samples: int) -> Optional[Any]:
@@ -161,14 +164,51 @@ def _stream_linearraw_preview(
 
 
 def _linearraw_page_is_streamable(page: Any) -> bool:
+    segment_bytes = _linearraw_segment_bytes(page)
+    return segment_bytes is not None and segment_bytes <= _PREVIEW_SEGMENT_MAX_BYTES
+
+
+def _linearraw_segment_bytes(page: Any) -> Optional[int]:
     shape = tuple(int(value) for value in page.shape)
     if len(shape) != 3 or shape[2] not in (3, 4) or page.dtype not in (np.uint8, np.uint16):
-        return False
+        return None
     height, width, samples = shape
     segment_height = int(page.tilelength if page.is_tiled else page.rowsperstrip or height)
     segment_width = int(page.tilewidth if page.is_tiled else width)
-    segment_bytes = segment_height * segment_width * samples * int(np.dtype(page.dtype).itemsize)
-    return segment_bytes <= _PREVIEW_SEGMENT_MAX_BYTES
+    return segment_height * segment_width * samples * int(np.dtype(page.dtype).itemsize)
+
+
+def _streaming_linearraw_memory_estimate(
+    page: Any,
+    page0: Any,
+    max_edge: int,
+    *,
+    normalize_tags: bool,
+) -> Optional[PreviewMemoryEstimate]:
+    """Estimate peak memory for the segmented LinearRaw preview path."""
+    segment_bytes = _linearraw_segment_bytes(page)
+    if segment_bytes is None or segment_bytes > _PREVIEW_SEGMENT_MAX_BYTES:
+        return None
+
+    height, width, samples = (int(value) for value in page.shape)
+    scale = min(1.0, max(1, int(max_edge)) / max(height, width))
+    preview_width = max(1, int(round(width * scale)))
+    preview_height = max(1, int(round(height * scale)))
+    cached_bytes = preview_width * preview_height * samples * np.dtype(np.float32).itemsize
+
+    linearization_bytes = 0
+    if normalize_tags:
+        linearization_tag = page.tags.get("LinearizationTable") or page0.tags.get("LinearizationTable")
+        if linearization_tag is not None:
+            linearization_bytes = max(0, int(getattr(linearization_tag, "count", 0))) * np.dtype(np.float32).itemsize
+    segment_multiplier = _NORMALIZED_SEGMENT_WORKING_MULTIPLIER if normalize_tags else _CONVERTED_SEGMENT_WORKING_MULTIPLIER
+    decode_working_bytes = segment_bytes * segment_multiplier + cached_bytes + linearization_bytes
+    downstream_working_bytes = cached_bytes * 3 + linearization_bytes
+    return PreviewMemoryEstimate(
+        cached_bytes=int(cached_bytes),
+        temporary_bytes=int(max(decode_working_bytes, downstream_working_bytes)),
+        source_dimensions=(width, height),
+    )
 
 
 def _peek_linear_dng_rgb_preview(
@@ -389,19 +429,30 @@ class RawpyLoader(IImageLoader):
     @staticmethod
     def supports_cancellable_linear_preview(file_path: str) -> bool:
         """Return whether preview decode is bounded and checks cancellation between segments."""
+        return RawpyLoader.estimate_cancellable_linear_preview_memory(file_path, 1) is not None
+
+    @staticmethod
+    def estimate_cancellable_linear_preview_memory(file_path: str, max_edge: int) -> Optional[PreviewMemoryEstimate]:
+        """Estimate a segmented LinearRaw preview from TIFF metadata only."""
         if not _is_dng(file_path):
-            return False
+            return None
         try:
             with tifffile.TiffFile(file_path) as tif:
+                page0 = tif.pages[0]
                 page_4ch = _find_linearraw_page(tif, samples=4)
                 if page_4ch is not None:
-                    return _linearraw_page_is_streamable(page_4ch)
+                    return _streaming_linearraw_memory_estimate(page_4ch, page0, max_edge, normalize_tags=False)
                 page_3ch = _find_linearraw_page(tif, samples=3)
-                return (
-                    page_3ch is not None and int(page_3ch.compression) in _JPEG_XL_COMPRESSIONS and _linearraw_page_is_streamable(page_3ch)
+                if page_3ch is None or int(page_3ch.compression) not in _JPEG_XL_COMPRESSIONS:
+                    return None
+                return _streaming_linearraw_memory_estimate(
+                    page_3ch,
+                    page0,
+                    max_edge,
+                    normalize_tags=True,
                 )
         except Exception:
-            return False
+            return None
 
     def load(
         self,
