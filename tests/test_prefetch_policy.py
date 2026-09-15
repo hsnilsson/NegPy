@@ -84,8 +84,7 @@ def test_prefetch_preflight_rejects_before_loader_decode() -> None:
     manager.load_linear_preview = MagicMock()
 
     with (
-        patch("negpy.services.rendering.preview_manager.loader_factory.allows_linear_preview_prefetch", return_value=True),
-        patch("negpy.services.rendering.preview_manager.loader_factory.estimate_preview_memory", return_value=_estimate()),
+        patch("negpy.services.rendering.preview_manager.loader_factory.estimate_linear_preview_prefetch_memory", return_value=_estimate()),
         patch("negpy.services.rendering.preview_manager.available_system_memory_bytes", return_value=1),
     ):
         admitted = manager.prefetch_linear_preview(
@@ -103,10 +102,9 @@ def test_prefetch_rejects_a_non_cancellable_loader_before_decode() -> None:
     manager = PreviewManager()
     manager.load_linear_preview = MagicMock()
 
-    with (
-        patch("negpy.services.rendering.preview_manager.loader_factory.allows_linear_preview_prefetch", return_value=False),
-        patch("negpy.services.rendering.preview_manager.loader_factory.estimate_preview_memory", return_value=_estimate()) as estimate,
-    ):
+    with patch(
+        "negpy.services.rendering.preview_manager.loader_factory.estimate_linear_preview_prefetch_memory", return_value=None
+    ) as estimate:
         admitted = manager.prefetch_linear_preview(
             "/camera.dng",
             "Adobe RGB",

@@ -104,12 +104,13 @@ class LoaderFactory:
             profile = "scan"
         return estimate_preview_memory(file_path, max_edge, profile)
 
-    def allows_linear_preview_prefetch(self, file_path: str, estimate: PreviewMemoryEstimate) -> bool:
-        """Admit bounded cooperative decodes and small non-LibRaw decodes."""
+    def estimate_linear_preview_prefetch_memory(self, file_path: str, max_edge: int) -> Optional[PreviewMemoryEstimate]:
+        """Estimate an admissible neighbor decode, or return None before pixel decode."""
         loader = self._select_loader(file_path)
         if loader is self._rawpy:
-            return loader.supports_cancellable_linear_preview(file_path)
-        return estimate.temporary_bytes <= _MAX_FAST_PREFETCH_WORKING_BYTES
+            return loader.estimate_cancellable_linear_preview_memory(file_path, max_edge)
+        estimate = self.estimate_preview_memory(file_path, max_edge)
+        return estimate if estimate.temporary_bytes <= _MAX_FAST_PREFETCH_WORKING_BYTES else None
 
 
 # Global instance for shared use
