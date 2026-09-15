@@ -89,15 +89,12 @@ class _ThumbnailDelegate(QStyledItemDelegate):
     def __init__(self, parent=None, state: Optional[AppState] = None) -> None:
         super().__init__(parent)
         self._state = state
+        self._placeholder_icon = qta.icon("fa5s.image", color=THEME.text_muted)
 
     def _is_dirty(self, file_info: dict) -> bool:
         """Only the active file can carry unsaved edits; every other frame is on disk."""
         state = self._state
         return bool(state and state.is_dirty and state.current_file_path and file_info.get("path") == state.current_file_path)
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self._placeholder_icon = qta.icon("fa5s.image", color=THEME.text_muted)
 
     @staticmethod
     def _fit_rect(area: QRect, source_size: QSize) -> QRect:
