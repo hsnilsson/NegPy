@@ -17,6 +17,9 @@ from negpy.infrastructure.loaders.constants import (
 )
 
 
+_MAX_FAST_PREFETCH_WORKING_BYTES = 256 * 1024 * 1024
+
+
 class LoaderFactory:
     """
     Selects loader based on file ext/header.
@@ -103,11 +106,12 @@ class LoaderFactory:
             profile = "scan"
         return estimate_preview_memory(file_path, max_edge, profile)
 
-    def supports_cancellable_linear_preview(self, file_path: str) -> bool:
-        """Return whether background linear decode can stop at bounded intervals."""
+    def allows_linear_preview_prefetch(self, file_path: str, estimate: PreviewMemoryEstimate) -> bool:
+        """Admit bounded cooperative decodes and small non-LibRaw decodes."""
         loader = self._select_loader(file_path)
-        check = getattr(loader, "supports_cancellable_linear_preview", None)
-        return bool(check is not None and check(file_path))
+        if loader is self._rawpy:
+            return loader.supports_cancellable_linear_preview(file_path)
+        return estimate.temporary_bytes <= _MAX_FAST_PREFETCH_WORKING_BYTES
 
 
 # Global instance for shared use

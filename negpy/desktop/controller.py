@@ -1968,10 +1968,16 @@ class AppController(QObject):
             return
 
         display_order = self.session.asset_model.visible_actual_indices_ordered()
-        protected_file_hash = files[index].get("hash")
-        tasks = [
-            self._neighbor_prefetch_task(asset, generation, protected_file_hash) for asset in neighbor_assets(files, display_order, index)
-        ]
+        selected_hash = files[index].get("hash")
+        protected_file_hashes = [selected_hash] if selected_hash else []
+        tasks = []
+        for asset in neighbor_assets(files, display_order, index):
+            task = self._neighbor_prefetch_task(asset, generation, tuple(protected_file_hashes))
+            if task is None:
+                continue
+            tasks.append(task)
+            if task.file_hash:
+                protected_file_hashes.append(task.file_hash)
         self._neighbor_prefetch_queue = [task for task in tasks if task is not None]
         self._start_next_neighbor_prefetch()
 
@@ -1979,7 +1985,7 @@ class AppController(QObject):
         self,
         asset: dict,
         generation: int,
-        protected_file_hash: str | None,
+        protected_file_hashes: tuple[str, ...],
     ) -> Optional[PreviewLoadTask]:
         if is_composite(asset):
             return None
@@ -2003,7 +2009,7 @@ class AppController(QObject):
             use_splash=False,
             for_cache_warm=True,
             integrated_gpu=integrated_gpu,
-            protected_file_hash=protected_file_hash,
+            protected_file_hashes=protected_file_hashes,
             half_slice=self._half_slice_for_asset(asset["path"], file_hash),
             demosaic=saved.process.demosaic_preview if saved else self.state.config.process.demosaic_preview,
         )

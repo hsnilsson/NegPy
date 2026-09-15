@@ -92,6 +92,7 @@ class PreviewBufferCache:
         metadata: dict,
         *,
         protected_file_hashes: Collection[str] = (),
+        preserve_full_resolution: bool = False,
     ) -> None:
         t = key.as_tuple()
         b = int(buffer.nbytes)
@@ -113,7 +114,7 @@ class PreviewBufferCache:
                 self._order.remove(t)
             self._data[t] = _Entry(buffer=buffer, dims=dims, metadata=dict(metadata), byte_size=b)
             self._order.append(t)
-            self._evict_if_needed(frozenset(protected_file_hashes))
+            self._evict_if_needed(frozenset(protected_file_hashes), preserve_full_resolution)
 
     def invalidate_path_hash(self, file_hash: str) -> None:
         with self._lock:
@@ -130,12 +131,17 @@ class PreviewBufferCache:
         with self._lock:
             return key.as_tuple() in self._data
 
-    def usage(self, *, protected_file_hashes: Collection[str] = ()) -> PreviewCacheUsage:
+    def usage(
+        self,
+        *,
+        protected_file_hashes: Collection[str] = (),
+        preserve_full_resolution: bool = False,
+    ) -> PreviewCacheUsage:
         with self._lock:
             entries = len(self._data)
             bytes_used = sum(entry.byte_size for entry in self._data.values())
             protected = frozenset(protected_file_hashes)
-            reclaimable = [key for key in self._order if not self._is_protected(key, protected)]
+            reclaimable = [key for key in self._order if not self._is_protected(key, protected, preserve_full_resolution)]
             return PreviewCacheUsage(
                 entries=entries,
                 bytes_used=bytes_used,
@@ -151,8 +157,16 @@ class PreviewBufferCache:
             self._order.remove(t)
 
     @staticmethod
-    def _is_protected(key: Hashable, protected_file_hashes: frozenset[str]) -> bool:
-        if not protected_file_hashes or not isinstance(key, tuple) or not key or not isinstance(key[0], str):
+    def _is_protected(
+        key: Hashable,
+        protected_file_hashes: frozenset[str],
+        preserve_full_resolution: bool,
+    ) -> bool:
+        if not isinstance(key, tuple) or not key or not isinstance(key[0], str):
+            return False
+        if preserve_full_resolution and len(key) > 3 and bool(key[3]):
+            return True
+        if not protected_file_hashes:
             return False
         file_hash = key[0]
         if file_hash in protected_file_hashes:
@@ -160,7 +174,11 @@ class PreviewBufferCache:
         parts = file_hash.split("|", 2)
         return len(parts) == 3 and parts[0] in {"rgb", "hdr", "stitch"} and parts[1] in protected_file_hashes
 
-    def _evict_if_needed(self, protected_file_hashes: frozenset[str] = frozenset()) -> None:
+    def _evict_if_needed(
+        self,
+        protected_file_hashes: frozenset[str] = frozenset(),
+        preserve_full_resolution: bool = False,
+    ) -> None:
         max_n = self._app.preview_cache_max_entries
         max_b = self._app.preview_cache_max_bytes
 
@@ -168,7 +186,10 @@ class PreviewBufferCache:
             return sum(self._data[k].byte_size for k in self._order)
 
         def evict(reason: str) -> bool:
-            key = next((item for item in self._order if not self._is_protected(item, protected_file_hashes)), None)
+            key = next(
+                (item for item in self._order if not self._is_protected(item, protected_file_hashes, preserve_full_resolution)),
+                None,
+            )
             if key is None:
                 return False
             self._remove_key(key)

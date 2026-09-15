@@ -4,6 +4,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+from negpy.infrastructure.loaders.memory import PreviewMemoryEstimate
+from negpy.services.rendering.prefetch_policy import decide_prefetch
 from negpy.services.rendering.preview_cache import PreviewBufferCache, PreviewCacheKey
 from negpy.features.rgbscan.models import RgbScanConfig
 from negpy.services.rendering.preview_manager import PreviewManager
@@ -97,6 +99,59 @@ def test_prefetch_insert_cannot_replace_the_only_protected_entry() -> None:
     assert usage.reclaimable_entries == 0
     assert cache.get(active) is not None
     assert cache.get(neighbor) is None
+
+
+def test_half_resolution_prefetch_cannot_replace_an_hq_entry() -> None:
+    cache = PreviewBufferCache(_small_cfg())
+    buffer = np.zeros((2, 2, 3), dtype=np.float32)
+    active = PreviewCacheKey("active", False, "Adobe RGB", False)
+    previous_hq = PreviewCacheKey("previous", False, "Adobe RGB", True)
+    neighbor = PreviewCacheKey("neighbor", False, "Adobe RGB", False)
+    cache.put(active, buffer, (2, 2), {})
+    cache.put(previous_hq, buffer.copy(), (2, 2), {})
+
+    usage = cache.usage(protected_file_hashes={"active"}, preserve_full_resolution=True)
+    decision = decide_prefetch(
+        PreviewMemoryEstimate(buffer.nbytes, 1, (2, 2)),
+        usage,
+        4 * 1024 * 1024 * 1024,
+        integrated_gpu=False,
+    )
+    cache.put(
+        neighbor,
+        buffer.copy(),
+        (2, 2),
+        {},
+        protected_file_hashes={"active"},
+        preserve_full_resolution=True,
+    )
+
+    assert not decision.allowed
+    assert usage.reclaimable_entries == 0
+    assert cache.get(active) is not None
+    assert cache.get(previous_hq) is not None
+    assert cache.get(neighbor) is None
+
+
+def test_second_prefetch_cannot_replace_the_first_prefetched_neighbor() -> None:
+    cache = PreviewBufferCache(_small_cfg())
+    buffer = np.zeros((2, 2, 3), dtype=np.float32)
+    active = PreviewCacheKey("active", False, "Adobe RGB", False)
+    first = PreviewCacheKey("first", False, "Adobe RGB", False)
+    cache.put(active, buffer, (2, 2), {})
+    cache.put(first, buffer.copy(), (2, 2), {}, protected_file_hashes={"active"})
+
+    usage = cache.usage(protected_file_hashes={"active", "first"}, preserve_full_resolution=True)
+    decision = decide_prefetch(
+        PreviewMemoryEstimate(buffer.nbytes, 1, (2, 2)),
+        usage,
+        4 * 1024 * 1024 * 1024,
+        integrated_gpu=False,
+    )
+
+    assert not decision.allowed
+    assert cache.get(active) is not None
+    assert cache.get(first) is not None
 
 
 def test_full_resolution_entries_respect_slot_budget() -> None:
