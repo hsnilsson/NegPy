@@ -683,25 +683,39 @@ def _fit_sample(mask: np.ndarray) -> np.ndarray:
 
 def _erode_resize_bounded(plane: np.ndarray, dims: Tuple[int, int], kernel: np.ndarray) -> np.ndarray:
     """Apply the min-preserving downsample in source-row blocks."""
+    if plane.ndim == 3 and plane.shape[2] == 1:
+        plane = plane[:, :, 0]
     h, w = plane.shape[:2]
     dw, dh = dims
+    scale_y = h / dh
     channels = plane.shape[2] if plane.ndim == 3 else 1
     bytes_per_row = max(1, w * channels * plane.dtype.itemsize)
-    source_rows = max(1, (_IR_DOWNSAMPLE_WORK_BYTES // 2) // bytes_per_row)
+    source_rows = max(1, (_IR_DOWNSAMPLE_WORK_BYTES // 4) // bytes_per_row)
     output_rows = max(1, int(source_rows * dh / h))
     radius = kernel.shape[0] // 2
     output = np.empty((dh, dw, channels), dtype=np.float32) if plane.ndim == 3 else np.empty((dh, dw), dtype=np.float32)
 
     for top in range(0, dh, output_rows):
         bottom = min(dh, top + output_rows)
-        source_top = int(math.floor(top * h / dh))
-        source_bottom = int(math.ceil(bottom * h / dh))
+        source_top = math.floor(top * scale_y)
+        source_bottom = min(h, math.ceil((bottom - 1) * scale_y + scale_y))
         read_top = max(0, source_top - radius)
         read_bottom = min(h, source_bottom + radius)
         source = np.ascontiguousarray(plane[read_top:read_bottom], dtype=np.float32)
         eroded = cv2.erode(source, kernel)
         core = eroded[source_top - read_top : source_bottom - read_top]
-        output[top:bottom] = cv2.resize(core, (dw, bottom - top), interpolation=cv2.INTER_AREA)
+        horizontal = cv2.resize(core, (dw, len(core)), interpolation=cv2.INTER_AREA)
+        # Keep the full-image sampling grid across fractional block boundaries.
+        for row in range(top, bottom):
+            start = row * scale_y
+            end = start + scale_y
+            first, last = math.floor(start), min(h, math.ceil(end))
+            indices = np.arange(first, last)
+            overlap = np.minimum(indices + 1, end) - np.maximum(indices, start)
+            # OpenCV's area table omits fractional edges at or below this cutoff.
+            weights = (np.where(overlap > 1e-3, overlap, 0.0) / min(scale_y, h - start)).astype(np.float32)
+            values = horizontal[first - source_top : last - source_top]
+            output[row] = np.sum(values * weights.reshape((-1,) + (1,) * (values.ndim - 1)), axis=0)
     return output
 
 

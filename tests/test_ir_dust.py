@@ -3,6 +3,7 @@ import tempfile
 
 import cv2
 import numpy as np
+import pytest
 import tifffile
 
 from negpy.domain.models import WorkspaceConfig
@@ -1008,6 +1009,20 @@ def test_downsample_ir_matches_across_preview_and_export():
     assert np.array_equal(export, preview)
 
 
+@pytest.mark.parametrize("channels", [0, 1, 3])
+@pytest.mark.parametrize("budget", [32 * 1024, 128 * 1024])
+def test_downsample_ir_blocks_preserve_global_sampling(monkeypatch, channels, budget):
+    from negpy.features.retouch import logic
+
+    shape = (301, 451, channels) if channels else (301, 451)
+    plane = np.random.default_rng(17).uniform(0.2, 0.9, shape).astype(np.float32)
+    plane[148:152, 30:420] = 0.05
+    expected = logic.downsample_ir(plane, 100)
+    monkeypatch.setattr(logic, "_IR_DOWNSAMPLE_WORK_BYTES", budget)
+    actual = logic.downsample_ir(plane, 100)
+    np.testing.assert_allclose(actual, expected, rtol=0, atol=2e-6)
+
+
 def test_downsample_ir_bounds_large_rgb_work_blocks(monkeypatch):
     from negpy.features.retouch import logic
 
@@ -1029,6 +1044,17 @@ def test_downsample_ir_bounds_large_rgb_work_blocks(monkeypatch):
     assert len(seen) > 1
     assert max(seen) < source_bytes
     assert np.isfinite(result).all()
+
+
+@pytest.mark.parametrize("height,edge", [(3511, 1123), (4001, 1000)])
+def test_downsample_ir_blocks_match_tiny_fractional_edge_weights(monkeypatch, height, edge):
+    from negpy.features.retouch import logic
+
+    plane = np.random.default_rng(18).random((height, 41), dtype=np.float32)
+    expected = logic.downsample_ir(plane, edge)
+    monkeypatch.setattr(logic, "_IR_DOWNSAMPLE_WORK_BYTES", 32 * 1024)
+    actual = logic.downsample_ir(plane, edge)
+    np.testing.assert_allclose(actual, expected, rtol=0, atol=2e-6)
 
 
 def _noisy_frame(h: int, w: int, seed: int = 0) -> np.ndarray:
