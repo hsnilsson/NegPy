@@ -7,12 +7,20 @@ from negpy.services.rendering.preview_manager import PreviewManager
 from negpy.kernel.system.memory import _parse_vm_stat
 
 
-def _cache(*, entries_remaining: int = 4, bytes_remaining: int = 512 * 1024 * 1024) -> PreviewCacheUsage:
+def _cache(
+    *,
+    entries_remaining: int = 4,
+    bytes_remaining: int = 512 * 1024 * 1024,
+    reclaimable_entries: int = 0,
+    reclaimable_bytes: int = 0,
+) -> PreviewCacheUsage:
     return PreviewCacheUsage(
         entries=0,
         bytes_used=0,
         entries_remaining=entries_remaining,
         bytes_remaining=bytes_remaining,
+        reclaimable_entries=reclaimable_entries,
+        reclaimable_bytes=reclaimable_bytes,
     )
 
 
@@ -40,6 +48,28 @@ def test_prefetch_is_skipped_when_cache_budget_cannot_hold_result() -> None:
     assert "cache byte" in decision.reason
 
 
+def test_prefetch_is_allowed_when_a_cold_cache_entry_can_be_replaced() -> None:
+    cache = _cache(
+        entries_remaining=0,
+        bytes_remaining=0,
+        reclaimable_entries=1,
+        reclaimable_bytes=64 * 1024 * 1024,
+    )
+
+    decision = decide_prefetch(_estimate(cached=64 * 1024 * 1024), cache, 4 * 1024 * 1024 * 1024, integrated_gpu=False)
+
+    assert decision.allowed
+
+
+def test_prefetch_is_skipped_when_a_full_cache_contains_only_the_active_entry() -> None:
+    cache = _cache(entries_remaining=0, bytes_remaining=0)
+
+    decision = decide_prefetch(_estimate(cached=1), cache, 4 * 1024 * 1024 * 1024, integrated_gpu=False)
+
+    assert not decision.allowed
+    assert "cache entry" in decision.reason
+
+
 def test_integrated_gpu_keeps_extra_system_ram_free() -> None:
     estimate = _estimate(temporary=256 * 1024 * 1024)
     discrete = decide_prefetch(estimate, _cache(), 900 * 1024 * 1024, integrated_gpu=False)
@@ -54,6 +84,7 @@ def test_prefetch_preflight_rejects_before_loader_decode() -> None:
     manager.load_linear_preview = MagicMock()
 
     with (
+        patch("negpy.services.rendering.preview_manager.loader_factory.supports_cancellable_linear_preview", return_value=True),
         patch("negpy.services.rendering.preview_manager.loader_factory.estimate_preview_memory", return_value=_estimate()),
         patch("negpy.services.rendering.preview_manager.available_system_memory_bytes", return_value=1),
     ):
@@ -65,6 +96,26 @@ def test_prefetch_preflight_rejects_before_loader_decode() -> None:
         )
 
     assert not admitted
+    manager.load_linear_preview.assert_not_called()
+
+
+def test_prefetch_rejects_a_non_cancellable_loader_before_decode() -> None:
+    manager = PreviewManager()
+    manager.load_linear_preview = MagicMock()
+
+    with (
+        patch("negpy.services.rendering.preview_manager.loader_factory.supports_cancellable_linear_preview", return_value=False),
+        patch("negpy.services.rendering.preview_manager.loader_factory.estimate_preview_memory") as estimate,
+    ):
+        admitted = manager.prefetch_linear_preview(
+            "/camera.dng",
+            "Adobe RGB",
+            use_camera_wb=False,
+            file_hash="hash",
+        )
+
+    assert not admitted
+    estimate.assert_not_called()
     manager.load_linear_preview.assert_not_called()
 
 

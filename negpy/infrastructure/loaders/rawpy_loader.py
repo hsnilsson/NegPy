@@ -84,14 +84,9 @@ def _stream_linearraw_preview(
 ) -> Optional[Tuple[np.ndarray, Tuple[int, int]]]:
     """Decode LinearRaw segments into a preview-size float32 buffer."""
     shape = tuple(int(v) for v in page.shape)
-    if len(shape) != 3 or shape[2] not in (3, 4) or page.dtype not in (np.uint8, np.uint16):
+    if not _linearraw_page_is_streamable(page):
         return None
     height, width, samples = shape
-    segment_height = int(page.tilelength if page.is_tiled else page.rowsperstrip or height)
-    segment_width = int(page.tilewidth if page.is_tiled else width)
-    segment_bytes = segment_height * segment_width * samples * int(np.dtype(page.dtype).itemsize)
-    if segment_bytes > _PREVIEW_SEGMENT_MAX_BYTES:
-        return None
     if should_cancel is not None and should_cancel():
         raise InterruptedError("preview load cancelled")
 
@@ -163,6 +158,17 @@ def _stream_linearraw_preview(
                 output = output[box[1] : box[3], box[0] : box[2]]
                 full_dims = (int(round(crop_height)), int(round(crop_width)))
     return np.ascontiguousarray(output), full_dims
+
+
+def _linearraw_page_is_streamable(page: Any) -> bool:
+    shape = tuple(int(value) for value in page.shape)
+    if len(shape) != 3 or shape[2] not in (3, 4) or page.dtype not in (np.uint8, np.uint16):
+        return False
+    height, width, samples = shape
+    segment_height = int(page.tilelength if page.is_tiled else page.rowsperstrip or height)
+    segment_width = int(page.tilewidth if page.is_tiled else width)
+    segment_bytes = segment_height * segment_width * samples * int(np.dtype(page.dtype).itemsize)
+    return segment_bytes <= _PREVIEW_SEGMENT_MAX_BYTES
 
 
 def _peek_linear_dng_rgb_preview(
@@ -379,6 +385,23 @@ class RawpyLoader(IImageLoader):
     previews stream through tifffile. Full-resolution 3-channel loads fall back to a
     tag-aware tifffile decode when libraw cannot unpack the file.
     """
+
+    @staticmethod
+    def supports_cancellable_linear_preview(file_path: str) -> bool:
+        """Return whether preview decode is bounded and checks cancellation between segments."""
+        if not _is_dng(file_path):
+            return False
+        try:
+            with tifffile.TiffFile(file_path) as tif:
+                page_4ch = _find_linearraw_page(tif, samples=4)
+                if page_4ch is not None:
+                    return _linearraw_page_is_streamable(page_4ch)
+                page_3ch = _find_linearraw_page(tif, samples=3)
+                return (
+                    page_3ch is not None and int(page_3ch.compression) in _JPEG_XL_COMPRESSIONS and _linearraw_page_is_streamable(page_3ch)
+                )
+        except Exception:
+            return False
 
     def load(
         self,

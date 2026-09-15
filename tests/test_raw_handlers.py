@@ -218,6 +218,25 @@ def test_jxl_linear_dng_preview_streams_without_a_full_array_decode():
     np.testing.assert_allclose(ctx_mgr.data[0, 0], expected, atol=1e-5)
 
 
+def test_jxl_linear_dng_allows_cancellable_neighbor_prefetch():
+    h, w = 12, 10
+    table = np.linspace(0, 65535, 1024).astype(np.uint16)
+    codes = np.full((h, w, 3), 511, dtype=np.uint16)
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "dxo.dng")
+        _write_linear_dng_libraw_cant_read(path, h, w, codes, table)
+
+        assert LoaderFactory().supports_cancellable_linear_preview(path)
+
+
+def test_libraw_dng_does_not_allow_non_cancellable_neighbor_prefetch():
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "camera.dng")
+        _write_minimal_linearraw_dng(path, 12, 10)
+
+        assert not LoaderFactory().supports_cancellable_linear_preview(path)
+
+
 def test_jxl_linear_dng_preview_does_not_fall_back_when_a_segment_is_too_large():
     h, w = 12, 10
     table = np.linspace(0, 65535, 1024).astype(np.uint16)
