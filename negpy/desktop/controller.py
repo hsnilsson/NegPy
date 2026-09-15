@@ -1953,11 +1953,19 @@ class AppController(QObject):
             return
 
         display_order = self.session.asset_model.visible_actual_indices_ordered()
-        tasks = [self._neighbor_prefetch_task(asset, generation) for asset in neighbor_assets(files, display_order, index)]
+        protected_file_hash = files[index].get("hash")
+        tasks = [
+            self._neighbor_prefetch_task(asset, generation, protected_file_hash) for asset in neighbor_assets(files, display_order, index)
+        ]
         self._neighbor_prefetch_queue = [task for task in tasks if task is not None]
         self._start_next_neighbor_prefetch()
 
-    def _neighbor_prefetch_task(self, asset: dict, generation: int) -> Optional[PreviewLoadTask]:
+    def _neighbor_prefetch_task(
+        self,
+        asset: dict,
+        generation: int,
+        protected_file_hash: str | None,
+    ) -> Optional[PreviewLoadTask]:
         if is_composite(asset):
             return None
         file_hash = asset.get("hash")
@@ -1980,6 +1988,7 @@ class AppController(QObject):
             use_splash=False,
             for_cache_warm=True,
             integrated_gpu=integrated_gpu,
+            protected_file_hash=protected_file_hash,
             half_slice=self._half_slice_for_asset(asset["path"], file_hash),
             demosaic=saved.process.demosaic_preview if saved else self.state.config.process.demosaic_preview,
         )

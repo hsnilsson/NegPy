@@ -323,6 +323,16 @@ class TestAppController(unittest.TestCase):
         controller.preview_load_requested.emit.assert_called_once_with(first)
         self.assertEqual(controller._neighbor_prefetch_queue, [second])
 
+    def test_neighbor_prefetch_protects_the_selected_frame_cache_entry(self):
+        self.controller.session.repo.load_file_settings.return_value = None
+        self.controller._half_slice_for_asset = MagicMock(return_value=None)
+        asset = {"path": "/tmp/neighbor.dng", "hash": "neighbor"}
+
+        task = self.controller._neighbor_prefetch_task(asset, generation=4, protected_file_hash="selected")
+
+        self.assertIsNotNone(task)
+        self.assertEqual(task.protected_file_hash, "selected")
+
     def test_render_waits_for_running_neighbor_prefetch_to_stop(self):
         import numpy as np
 

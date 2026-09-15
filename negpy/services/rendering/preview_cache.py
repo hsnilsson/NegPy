@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Hashable, Optional
 
@@ -54,6 +55,8 @@ class PreviewCacheUsage:
     bytes_used: int
     entries_remaining: int
     bytes_remaining: int
+    reclaimable_entries: int
+    reclaimable_bytes: int
 
 
 class PreviewBufferCache:
@@ -81,7 +84,15 @@ class PreviewBufferCache:
             self._order.append(t)
             return ent.buffer, ent.dims, ent.metadata
 
-    def put(self, key: PreviewCacheKey, buffer: ImageBuffer, dims: Dimensions, metadata: dict) -> None:
+    def put(
+        self,
+        key: PreviewCacheKey,
+        buffer: ImageBuffer,
+        dims: Dimensions,
+        metadata: dict,
+        *,
+        protected_file_hashes: Collection[str] = (),
+    ) -> None:
         t = key.as_tuple()
         b = int(buffer.nbytes)
         if b > self._app.preview_cache_max_bytes:
@@ -102,7 +113,7 @@ class PreviewBufferCache:
                 self._order.remove(t)
             self._data[t] = _Entry(buffer=buffer, dims=dims, metadata=dict(metadata), byte_size=b)
             self._order.append(t)
-            self._evict_if_needed()
+            self._evict_if_needed(frozenset(protected_file_hashes))
 
     def invalidate_path_hash(self, file_hash: str) -> None:
         with self._lock:
@@ -119,15 +130,19 @@ class PreviewBufferCache:
         with self._lock:
             return key.as_tuple() in self._data
 
-    def usage(self) -> PreviewCacheUsage:
+    def usage(self, *, protected_file_hashes: Collection[str] = ()) -> PreviewCacheUsage:
         with self._lock:
             entries = len(self._data)
             bytes_used = sum(entry.byte_size for entry in self._data.values())
+            protected = frozenset(protected_file_hashes)
+            reclaimable = [key for key in self._order if not self._is_protected(key, protected)]
             return PreviewCacheUsage(
                 entries=entries,
                 bytes_used=bytes_used,
                 entries_remaining=max(0, self._app.preview_cache_max_entries - entries),
                 bytes_remaining=max(0, self._app.preview_cache_max_bytes - bytes_used),
+                reclaimable_entries=len(reclaimable),
+                reclaimable_bytes=sum(self._data[key].byte_size for key in reclaimable),
             )
 
     def _remove_key(self, t: Hashable) -> None:
@@ -135,19 +150,35 @@ class PreviewBufferCache:
         if t in self._order:
             self._order.remove(t)
 
-    def _evict_if_needed(self) -> None:
+    @staticmethod
+    def _is_protected(key: Hashable, protected_file_hashes: frozenset[str]) -> bool:
+        if not protected_file_hashes or not isinstance(key, tuple) or not key or not isinstance(key[0], str):
+            return False
+        file_hash = key[0]
+        if file_hash in protected_file_hashes:
+            return True
+        parts = file_hash.split("|", 2)
+        return len(parts) == 3 and parts[0] in {"rgb", "hdr", "stitch"} and parts[1] in protected_file_hashes
+
+    def _evict_if_needed(self, protected_file_hashes: frozenset[str] = frozenset()) -> None:
         max_n = self._app.preview_cache_max_entries
         max_b = self._app.preview_cache_max_bytes
 
         def total_bytes() -> int:
             return sum(self._data[k].byte_size for k in self._order)
 
+        def evict(reason: str) -> bool:
+            key = next((item for item in self._order if not self._is_protected(item, protected_file_hashes)), None)
+            if key is None:
+                return False
+            self._remove_key(key)
+            logger.debug("preview cache evict (%s): dropped entry", reason)
+            return True
+
         while len(self._order) > max_n and self._order:
-            t = self._order.pop(0)
-            self._data.pop(t, None)
-            logger.debug("preview cache evict (count): dropped entry")
+            if not evict("count"):
+                break
 
         while total_bytes() > max_b and self._order:
-            t = self._order.pop(0)
-            self._data.pop(t, None)
-            logger.debug("preview cache evict (bytes): dropped entry")
+            if not evict("bytes"):
+                break

@@ -62,6 +62,43 @@ def test_cache_usage_reports_remaining_entry_and_byte_budgets() -> None:
     assert usage.bytes_remaining == 1000 - buffer.nbytes
 
 
+def test_prefetch_insert_replaces_a_cold_entry_in_a_full_cache() -> None:
+    cache = PreviewBufferCache(_small_cfg())
+    buffer = np.zeros((2, 2, 3), dtype=np.float32)
+    active = PreviewCacheKey("active", False, "Adobe RGB", False)
+    cold = PreviewCacheKey("cold", False, "Adobe RGB", False)
+    neighbor = PreviewCacheKey("neighbor", False, "Adobe RGB", False)
+    cache.put(active, buffer, (2, 2), {})
+    cache.put(cold, buffer.copy(), (2, 2), {})
+
+    usage = cache.usage(protected_file_hashes={"active"})
+    cache.put(neighbor, buffer.copy(), (2, 2), {}, protected_file_hashes={"active"})
+
+    assert usage.entries_remaining == 0
+    assert usage.reclaimable_entries == 1
+    assert cache.get(active) is not None
+    assert cache.get(cold) is None
+    assert cache.get(neighbor) is not None
+
+
+def test_prefetch_insert_cannot_replace_the_only_protected_entry() -> None:
+    cfg = _small_cfg()
+    cfg.preview_cache_max_entries = 1
+    cache = PreviewBufferCache(cfg)
+    buffer = np.zeros((2, 2, 3), dtype=np.float32)
+    active = PreviewCacheKey("active", False, "Adobe RGB", False)
+    neighbor = PreviewCacheKey("neighbor", False, "Adobe RGB", False)
+    cache.put(active, buffer, (2, 2), {})
+
+    usage = cache.usage(protected_file_hashes={"active"})
+    cache.put(neighbor, buffer.copy(), (2, 2), {}, protected_file_hashes={"active"})
+
+    assert usage.entries_remaining == 0
+    assert usage.reclaimable_entries == 0
+    assert cache.get(active) is not None
+    assert cache.get(neighbor) is None
+
+
 def test_full_resolution_entries_respect_slot_budget() -> None:
     """Full-res (HQ) buffers beyond the slot budget evict oldest-first instead of
     pushing every small preview out through the byte cap."""

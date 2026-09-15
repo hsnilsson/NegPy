@@ -24,10 +24,10 @@ def decide_prefetch(
     *,
     integrated_gpu: bool,
 ) -> PrefetchDecision:
-    """Admit a prefetch only when it fits without cache eviction or system paging."""
-    if cache.entries_remaining < 1:
+    """Admit a prefetch only when safe LRU eviction and RAM margins can hold it."""
+    if cache.entries_remaining + cache.reclaimable_entries < 1:
         return PrefetchDecision(False, "preview cache entry budget is full", 0)
-    if estimate.cached_bytes > cache.bytes_remaining:
+    if estimate.cached_bytes > cache.bytes_remaining + cache.reclaimable_bytes:
         return PrefetchDecision(False, "preview cache byte budget is full", 0)
 
     working_bytes = estimate.temporary_bytes + estimate.cached_bytes

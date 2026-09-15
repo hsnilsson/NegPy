@@ -101,6 +101,12 @@ class LoaderFactory:
             profile = "scan"
         return estimate_preview_memory(file_path, max_edge, profile)
 
+    def supports_cancellable_linear_preview(self, file_path: str) -> bool:
+        """Return whether background linear decode can stop at bounded intervals."""
+        loader = self._select_loader(file_path)
+        check = getattr(loader, "supports_cancellable_linear_preview", None)
+        return bool(check is not None and check(file_path))
+
 
 # Global instance for shared use
 loader_factory = LoaderFactory()
