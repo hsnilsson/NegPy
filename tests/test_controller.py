@@ -287,6 +287,14 @@ class TestAppController(unittest.TestCase):
         mock_slot.assert_called_once_with(1.0)
         self.assertFalse(self.controller.state.hq_preview)
 
+    def test_load_file_tags_the_decode_with_the_current_generation(self):
+        tasks = []
+        self.controller.preview_load_requested.connect(tasks.append)
+
+        self.controller.load_file("dummy.dng")
+
+        self.assertEqual(tasks[-1].generation, self.controller._prefetch_gen)
+
     def test_preview_load_defers_neighbor_prefetch_until_render_finishes(self):
         self.controller._requested_file_path = "/tmp/a.dng"
         self.controller.request_render = MagicMock()

@@ -1,5 +1,6 @@
 import os
 import time
+from collections.abc import Callable
 from typing import Any, Optional, Tuple
 
 import cv2
@@ -430,7 +431,7 @@ class PreviewManager:
         Quick embedded-JPEG (or half-size) RGB for first paint. Returns None if not available.
         """
         try:
-            ctx_mgr, _metadata = loader_factory.get_loader(file_path)
+            ctx_mgr, _metadata = loader_factory.get_loader(file_path, preview_max_edge=APP_CONFIG.preview_render_size)
         except Exception:
             return None
         try:
@@ -484,7 +485,13 @@ class PreviewManager:
                 logger.debug("preview cache hit %.3fs for %s", time.perf_counter() - t_all, file_path)
                 return hit  # cache hit — caller must not mutate this buffer
 
-        ctx_mgr, metadata = loader_factory.get_loader(file_path, linear_raw=not use_camera_wb, positive_source=positive_source)
+        ctx_mgr, metadata = loader_factory.get_loader(
+            file_path,
+            linear_raw=not use_camera_wb,
+            positive_source=positive_source,
+            preview_max_edge=None if full_resolution else APP_CONFIG.preview_render_size,
+            should_cancel=should_cancel,
+        )
 
         if color_space is None:
             color_space = metadata.get("color_space") or WORKING_COLOR_SPACE
@@ -533,10 +540,13 @@ class PreviewManager:
         return out, dims, meta
 
     def decode_for_detection(self, file_path: str) -> Optional[ImageBuffer]:
-        """No-WB linear decode for autodetect only — skips the preview resize/orient/cache
-        (detect_process_mode downsamples), so it costs just the demosaic. Mirrors the fast path."""
+        """No-WB linear decode for autodetect outside the preview cache."""
         try:
-            ctx_mgr, _meta = loader_factory.get_loader(file_path, linear_raw=True)
+            ctx_mgr, _meta = loader_factory.get_loader(
+                file_path,
+                linear_raw=True,
+                preview_max_edge=APP_CONFIG.preview_render_size,
+            )
             with ctx_mgr as raw:
                 demosaic = rawpy.DemosaicAlgorithm.LINEAR
                 # half_size casts X-Trans channel ratios and skews detection. Bayer is fine.
@@ -567,6 +577,7 @@ class PreviewManager:
         full_resolution: bool = False,
         file_hash: str | None = None,
         demosaic: str = DemosaicMode.AUTO,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Tuple[ImageBuffer, Dimensions, dict]:
         """Merge a narrowband R/G/B triplet into one linear preview: red channel from the
         red shot, green from green, blue from blue. The merged result is cached, so re-visiting
@@ -595,9 +606,15 @@ class PreviewManager:
             if hit is not None:
                 return hit  # cache hit — caller must not mutate this buffer
 
-        red_out, dims, meta = self.load_linear_preview(red_path, color_space, False, full_resolution, file_hash, demosaic=demosaic)
-        green_out, _, _ = self.load_linear_preview(green_path, color_space, False, full_resolution, None, demosaic=demosaic)
-        blue_out, _, _ = self.load_linear_preview(blue_path, color_space, False, full_resolution, None, demosaic=demosaic)
+        red_out, dims, meta = self.load_linear_preview(
+            red_path, color_space, False, full_resolution, file_hash, demosaic=demosaic, should_cancel=should_cancel
+        )
+        green_out, _, _ = self.load_linear_preview(
+            green_path, color_space, False, full_resolution, None, demosaic=demosaic, should_cancel=should_cancel
+        )
+        blue_out, _, _ = self.load_linear_preview(
+            blue_path, color_space, False, full_resolution, None, demosaic=demosaic, should_cancel=should_cancel
+        )
 
         red = np.asarray(red_out, dtype=np.float32)
 
@@ -628,6 +645,7 @@ class PreviewManager:
         full_resolution: bool = False,
         file_hash: str | None = None,
         demosaic: str = DemosaicMode.AUTO,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Tuple[ImageBuffer, Dimensions, dict]:
         """Merge a bracket into one linear preview, in the reference frame's exposure units.
 
@@ -658,13 +676,28 @@ class PreviewManager:
                 return ensure_image(scaled), dims_c, meta_c
 
         ref_out, dims, meta = self.load_linear_preview(
-            reference_path, color_space, use_camera_wb, full_resolution, file_hash, demosaic=demosaic
+            reference_path,
+            color_space,
+            use_camera_wb,
+            full_resolution,
+            file_hash,
+            demosaic=demosaic,
+            should_cancel=should_cancel,
         )
         ref = np.asarray(ref_out, dtype=np.float32)
 
         def _load(path: str) -> np.ndarray:
             arr = np.asarray(
-                self.load_linear_preview(path, color_space, use_camera_wb, full_resolution, None, demosaic=demosaic)[0], dtype=np.float32
+                self.load_linear_preview(
+                    path,
+                    color_space,
+                    use_camera_wb,
+                    full_resolution,
+                    None,
+                    demosaic=demosaic,
+                    should_cancel=should_cancel,
+                )[0],
+                dtype=np.float32,
             )
             if arr.shape[:2] != ref.shape[:2]:
                 # Preview sizing rounds per file, so a pixel or two between frames of one
@@ -697,6 +730,7 @@ class PreviewManager:
         file_hash: str | None = None,
         flatfield_profile_id: str = "",
         demosaic: str = DemosaicMode.AUTO,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Tuple[ImageBuffer, Dimensions, dict]:
         """Assemble a stitch composite at preview scale by replaying the stored
         registration. Flat-field is applied per part here (a composite canvas must
@@ -729,10 +763,25 @@ class PreviewManager:
             if green and blue:
                 part_rgb = RgbScanConfig(enabled=True, green_path=green, blue_path=blue, align=stitch.stitch_align)
                 out, _, part_meta = self.load_linear_preview_rgb(
-                    path, part_rgb, color_space, use_camera_wb, full_resolution, None, demosaic=demosaic
+                    path,
+                    part_rgb,
+                    color_space,
+                    use_camera_wb,
+                    full_resolution,
+                    None,
+                    demosaic=demosaic,
+                    should_cancel=should_cancel,
                 )
             else:
-                out, _, part_meta = self.load_linear_preview(path, color_space, use_camera_wb, full_resolution, None, demosaic=demosaic)
+                out, _, part_meta = self.load_linear_preview(
+                    path,
+                    color_space,
+                    use_camera_wb,
+                    full_resolution,
+                    None,
+                    demosaic=demosaic,
+                    should_cancel=should_cancel,
+                )
             parts.append(apply_flatfield(np.asarray(out, dtype=np.float32), flatfield))
             irs.append(part_meta.get("ir_preview"))
             if i == 0:
@@ -757,6 +806,7 @@ class PreviewManager:
         half_slice: tuple[int, float, tuple[float, float, float, float] | None, float] | None = None,
         demosaic: str = DemosaicMode.AUTO,
         positive_source: bool = False,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Tuple[Optional[Tuple[ImageBuffer, Dimensions]], Tuple[ImageBuffer, Dimensions, dict]]:
         """
         Open the RAW file once and return both the splash preview and the linear
@@ -790,7 +840,13 @@ class PreviewManager:
                 return None, hit  # no splash on cache hit — linear is already fast
 
         try:
-            ctx_mgr, metadata = loader_factory.get_loader(file_path, linear_raw=not use_camera_wb, positive_source=positive_source)
+            ctx_mgr, metadata = loader_factory.get_loader(
+                file_path,
+                linear_raw=not use_camera_wb,
+                positive_source=positive_source,
+                preview_max_edge=None if full_resolution else APP_CONFIG.preview_render_size,
+                should_cancel=should_cancel,
+            )
         except Exception as e:
             logger.debug("preview load_splash_and_linear open failed: %s", e)
             raise

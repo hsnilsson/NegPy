@@ -191,6 +191,7 @@ class PreviewLoadTask:
     file_path: str
     workspace_color_space: str
     use_camera_wb: bool
+    generation: int = 0
     positive_source: bool = False
     full_resolution: bool = False
     file_hash: str | None = None
@@ -406,7 +407,6 @@ class ThumbnailWorker(QObject):
     activity = pyqtSignal(str)
     # A completed frame enters the filmstrip before the next source starts.
     partial = pyqtSignal(dict)
-    started = pyqtSignal()
     # Rendered positives use their own signal, so the batch's bulk overwrite cannot clobber a
     # frame that already rendered on the canvas.
     rendered_finished = pyqtSignal(dict)
@@ -454,7 +454,6 @@ class ThumbnailWorker(QObject):
         if not self._active:
             self.activity.emit("")
             return
-        self.started.emit()
         timer.start(0)
 
     @pyqtSlot()
@@ -1055,6 +1054,7 @@ class PreviewLoadWorker(QObject):
 
         def cancelled() -> bool:
             return not self._is_current(task)
+
         t0 = time.perf_counter()
         try:
             if stitch_active(task.stitch):
@@ -1069,7 +1069,10 @@ class PreviewLoadWorker(QObject):
                     file_hash=task.file_hash,
                     flatfield_profile_id=task.flatfield_profile_id,
                     demosaic=task.demosaic,
+                    should_cancel=cancelled,
                 )
+                if not self._is_current(task):
+                    return
                 source_cs = metadata.get("color_space") or WORKING_COLOR_SPACE
                 ir_preview = metadata.get("ir_preview")
                 detected_mode = self._detect_mode(task, raw) if task.detect_mode else ""
@@ -1103,7 +1106,10 @@ class PreviewLoadWorker(QObject):
                     full_resolution=task.full_resolution,
                     file_hash=task.file_hash,
                     demosaic=task.demosaic,
+                    should_cancel=cancelled,
                 )
+                if not self._is_current(task):
+                    return
                 source_cs = metadata.get("color_space") or WORKING_COLOR_SPACE
                 ir_preview = metadata.get("ir_preview")
                 detected_mode = self._detect_mode(task, raw) if task.detect_mode else ""
@@ -1137,7 +1143,10 @@ class PreviewLoadWorker(QObject):
                     full_resolution=task.full_resolution,
                     file_hash=task.file_hash,
                     demosaic=task.demosaic,
+                    should_cancel=cancelled,
                 )
+                if not self._is_current(task):
+                    return
                 source_cs = metadata.get("color_space") or WORKING_COLOR_SPACE
                 ir_preview = metadata.get("ir_preview")
                 detected_mode = self._detect_mode(task, raw) if task.detect_mode else ""
@@ -1172,7 +1181,10 @@ class PreviewLoadWorker(QObject):
                     half_slice=task.half_slice,
                     demosaic=task.demosaic,
                     positive_source=task.positive_source,
+                    should_cancel=cancelled,
                 )
+                if not self._is_current(task):
+                    return
                 if sp is not None:
                     sbuf, sdims = sp
                     self.splash.emit(task.file_path, sbuf, sdims)
@@ -1187,7 +1199,10 @@ class PreviewLoadWorker(QObject):
                     half_slice=task.half_slice,
                     demosaic=task.demosaic,
                     positive_source=task.positive_source,
+                    should_cancel=cancelled,
                 )
+                if not self._is_current(task):
+                    return
             source_cs = metadata.get("color_space") or WORKING_COLOR_SPACE
             ir_preview = metadata.get("ir_preview")
             detected_mode = self._detect_mode(task, raw) if task.detect_mode else ""
@@ -1209,6 +1224,8 @@ class PreviewLoadWorker(QObject):
                 (metadata.get("cam_xyz"), metadata.get("camera_wb")),
                 metadata.get("detect_preview"),
             )
+        except InterruptedError:
+            return
         except Exception as e:
             if not self._is_current(task):
                 return

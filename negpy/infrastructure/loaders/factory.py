@@ -66,6 +66,8 @@ class LoaderFactory:
         file_path: str,
         linear_raw: bool = False,
         positive_source: bool = False,
+        preview_max_edge: Optional[int] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Tuple[ContextManager[Any], dict]:
         loader = self._select_loader(file_path)
 
@@ -74,7 +76,7 @@ class LoaderFactory:
         if loader is self._nef or loader is self._fff:
             return loader.load(file_path, linear_raw=linear_raw)
         if loader is self._rawpy:
-            return loader.load(file_path)
+            return loader.load(file_path, preview_max_edge=preview_max_edge, should_cancel=should_cancel)
         return loader.load(file_path)
 
     def load_bounded_preview(

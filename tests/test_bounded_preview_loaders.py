@@ -6,7 +6,6 @@ from PIL import Image
 
 from negpy.infrastructure.loaders.factory import LoaderFactory
 from negpy.infrastructure.loaders.fff_loader import FffLoader
-from negpy.infrastructure.loaders.memory import PreviewMemoryEstimate
 from negpy.infrastructure.loaders.jpeg_loader import JpegLoader
 from negpy.infrastructure.loaders.jxl_loader import JxlLoader
 from negpy.infrastructure.loaders.nef_loader import NefLoader

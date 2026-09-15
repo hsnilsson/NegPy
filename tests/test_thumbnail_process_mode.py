@@ -80,6 +80,15 @@ class BatchRequest(unittest.TestCase):
         controller.thumb_worker.cancel_pending.assert_not_called()
         controller.thumbnail_cancel_requested.emit.assert_not_called()
 
+    def test_empty_thumbnail_activity_marks_the_queue_idle(self):
+        controller = MagicMock()
+        controller._thumbnail_queue_active = True
+
+        AppController._on_thumbnail_activity(controller, "")
+
+        self.assertFalse(controller._thumbnail_queue_active)
+        controller.thumbnail_activity_changed.emit.assert_called_once_with("")
+
     def test_rendered_active_thumbnail_resumes_the_background_queue(self):
         controller = MagicMock()
         controller._thumbnails_paused_for_foreground = True

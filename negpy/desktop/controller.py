@@ -676,9 +676,8 @@ class AppController(QObject):
 
         self.thumbnail_requested.connect(self.thumb_worker.generate)
         self.thumbnail_cancel_requested.connect(self.thumb_worker.cancel)
-        self.thumb_worker.activity.connect(self.thumbnail_activity_changed)
+        self.thumb_worker.activity.connect(self._on_thumbnail_activity)
         self.thumbnail_update_requested.connect(self.thumb_worker.update_rendered)
-        self.thumb_worker.started.connect(self._on_thumbnails_started)
         self.thumb_worker.partial.connect(self._apply_thumbnails)
         self.thumb_worker.rendered_finished.connect(self._on_rendered_thumbnail)
 
@@ -817,8 +816,10 @@ class AppController(QObject):
         self.session.asset_model.refresh()
         return broken
 
-    def _on_thumbnails_started(self) -> None:
-        self._thumbnail_queue_active = True
+    def _on_thumbnail_activity(self, key: str) -> None:
+        self._thumbnail_queue_active = bool(key)
+        self.thumbnail_activity_changed.emit(key)
+
     def _on_rendered_thumbnail(self, new_thumbs: Dict[str, Any]) -> None:
         """A canvas render produced a thumbnail — it supersedes any batch placeholder."""
         for key, pil_img in new_thumbs.items():
@@ -1829,6 +1830,7 @@ class AppController(QObject):
                 file_path=file_path,
                 workspace_color_space=self.state.workspace_color_space,
                 use_camera_wb=not effective_linear_raw(self.state.config.process, self.state.config.exposure.render_intent),
+                generation=self._prefetch_gen,
                 positive_source=self.state.config.process.positive_source,
                 full_resolution=self.state.hq_preview,
                 # The half suffix distinguishes the two halves' preview caches now

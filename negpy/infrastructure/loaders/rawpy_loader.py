@@ -2,6 +2,7 @@ import os
 from collections.abc import Callable
 from typing import Any, ContextManager, Optional, Tuple
 
+import cv2
 import numpy as np
 import rawpy
 import tifffile
@@ -24,6 +25,8 @@ logger = get_logger(__name__)
 
 # DNG PhotometricInterpretation value for LinearRaw (TIFF/EP §6.10.4).
 _LINEAR_RAW = 34892
+_JPEG_XL_COMPRESSIONS = {50002, 52546}
+_PREVIEW_SEGMENT_MAX_BYTES = 64 * 1024 * 1024
 _EMBEDDED_PREVIEW_MAX_BYTES = 64 * 1024 * 1024
 _NORMALIZED_SEGMENT_WORKING_MULTIPLIER = 16
 _CONVERTED_SEGMENT_WORKING_MULTIPLIER = 6
