@@ -221,6 +221,23 @@ def test_jxl_linear_dng_preview_streams_without_a_full_array_decode():
     np.testing.assert_allclose(ctx_mgr.data[0, 0], expected, atol=1e-5)
 
 
+@pytest.mark.parametrize("orientation", [1, 6, 8])
+def test_streamed_preview_reads_orientation_without_full_file_exif(tmp_path, orientation):
+    path = tmp_path / "rgbi.dng"
+    tifffile.imwrite(
+        path,
+        np.full((40, 60, 4), 32000, dtype=np.uint16),
+        photometric=34892,
+        planarconfig="contig",
+        rowsperstrip=5,
+        extratags=[(274, 3, 1, orientation, False)],
+    )
+    with patch("negpy.infrastructure.loaders.helpers.read_exif_from_file", side_effect=AssertionError("unbounded EXIF read")):
+        context, metadata = LoaderFactory().get_loader(str(path), preview_max_edge=20)
+    assert metadata["orientation"] == orientation
+    assert max(context.data.shape[:2]) == 20
+
+
 def test_jxl_linear_dng_allows_cancellable_neighbor_prefetch():
     h, w = 12, 10
     table = np.linspace(0, 65535, 1024).astype(np.uint16)
