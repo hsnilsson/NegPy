@@ -64,6 +64,33 @@ def test_cache_usage_reports_remaining_entry_and_byte_budgets() -> None:
     assert usage.bytes_remaining == 1000 - buffer.nbytes
 
 
+def test_cache_budgets_metadata_arrays_and_shared_views() -> None:
+    cache = PreviewBufferCache(_small_cfg())
+    buffer = np.zeros((2, 2, 3), dtype=np.float32)
+    ir = np.zeros((8, 8), dtype=np.float32)
+    detect = np.zeros_like(buffer)
+    cache.put(
+        PreviewCacheKey("active", False, "Adobe RGB", False),
+        buffer,
+        (8, 8),
+        {"ir": ir, "ir_preview": ir[::4, ::4], "detect_preview": detect},
+    )
+    assert cache.usage().bytes_used == buffer.nbytes + ir.nbytes + detect.nbytes
+
+
+def test_cache_rejects_oversized_metadata_without_evicting_active() -> None:
+    cfg = _small_cfg()
+    cfg.preview_cache_max_bytes = 200
+    cache = PreviewBufferCache(cfg)
+    buffer = np.zeros((2, 2, 3), dtype=np.float32)
+    active = PreviewCacheKey("active", False, "Adobe RGB", False)
+    neighbor = PreviewCacheKey("neighbor", False, "Adobe RGB", False)
+    cache.put(active, buffer, (2, 2), {})
+    cache.put(neighbor, buffer.copy(), (2, 2), {"ir": np.zeros((8, 8), dtype=np.float32)})
+    assert cache.contains(active)
+    assert not cache.contains(neighbor)
+
+
 def test_prefetch_insert_replaces_a_cold_entry_in_a_full_cache() -> None:
     cache = PreviewBufferCache(_small_cfg())
     buffer = np.zeros((2, 2, 3), dtype=np.float32)

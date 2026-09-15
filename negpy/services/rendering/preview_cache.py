@@ -5,12 +5,24 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Hashable, Optional
 
+import numpy as np
 
 from negpy.domain.types import AppConfig, Dimensions, ImageBuffer
 from negpy.kernel.system.config import APP_CONFIG
 from negpy.kernel.system.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _entry_bytes(buffer: ImageBuffer, metadata: dict) -> int:
+    """Count retained array allocations, including shared views, once per entry."""
+    allocations: dict[int, int] = {}
+    for value in (buffer, *metadata.values()):
+        if isinstance(value, np.ndarray):
+            while isinstance(value.base, np.ndarray):
+                value = value.base
+            allocations[id(value)] = int(value.nbytes)
+    return sum(allocations.values())
 
 
 @dataclass(frozen=True)
@@ -95,7 +107,7 @@ class PreviewBufferCache:
         preserve_full_resolution: bool = False,
     ) -> None:
         t = key.as_tuple()
-        b = int(buffer.nbytes)
+        b = _entry_bytes(buffer, metadata)
         if b > self._app.preview_cache_max_bytes:
             # The byte cap would evict it immediately, so do not churn the cache, or evict everything
             # else on the way out.
