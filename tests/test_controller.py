@@ -328,10 +328,32 @@ class TestAppController(unittest.TestCase):
         self.controller._half_slice_for_asset = MagicMock(return_value=None)
         asset = {"path": "/tmp/neighbor.dng", "hash": "neighbor"}
 
-        task = self.controller._neighbor_prefetch_task(asset, generation=4, protected_file_hash="selected")
+        task = self.controller._neighbor_prefetch_task(asset, generation=4, protected_file_hashes=("selected",))
 
         self.assertIsNotNone(task)
-        self.assertEqual(task.protected_file_hash, "selected")
+        self.assertEqual(task.protected_file_hashes, ("selected",))
+
+    def test_second_neighbor_prefetch_protects_the_first_neighbor(self):
+        state = self.controller.state
+        state.uploaded_files = [
+            {"path": "/tmp/previous.dng", "hash": "previous"},
+            {"path": "/tmp/selected.dng", "hash": "selected"},
+            {"path": "/tmp/next.dng", "hash": "next"},
+        ]
+        state.selected_file_idx = 1
+        self.controller._prefetch_gen = 4
+        self.controller.session.repo.load_file_settings.return_value = None
+        self.controller.session.asset_model = MagicMock()
+        self.controller.session.asset_model.visible_actual_indices_ordered.return_value = [0, 1, 2]
+        self.controller._half_slice_for_asset = MagicMock(return_value=None)
+        self.controller._start_next_neighbor_prefetch = MagicMock()
+
+        with patch("negpy.desktop.controller.GPUDevice.get", return_value=SimpleNamespace(is_integrated=False)):
+            self.controller._prepare_neighbor_prefetch(4)
+
+        first, second = self.controller._neighbor_prefetch_queue
+        self.assertEqual(first.protected_file_hashes, ("selected",))
+        self.assertEqual(second.protected_file_hashes, ("selected", "previous"))
 
     def test_render_waits_for_running_neighbor_prefetch_to_stop(self):
         import numpy as np

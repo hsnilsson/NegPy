@@ -197,7 +197,7 @@ class PreviewLoadTask:
     use_splash: bool = True
     for_cache_warm: bool = False
     integrated_gpu: bool = False
-    protected_file_hash: str | None = None
+    protected_file_hashes: tuple[str, ...] = ()
     detect_mode: bool = False  # run process-mode autodetect (new files only)
     # The assembly configs travel whole rather than flattened into loose fields. They are
     # frozen and hashable, the worker rebuilt them from the pieces anyway, and a new field on
@@ -1039,7 +1039,7 @@ class PreviewLoadWorker(QObject):
                     demosaic=task.demosaic,
                     positive_source=task.positive_source,
                     integrated_gpu=task.integrated_gpu,
-                    protected_file_hash=task.protected_file_hash,
+                    protected_file_hashes=task.protected_file_hashes,
                     should_cancel=lambda: not self._prefetch_is_current(task),
                 )
         except InterruptedError:

@@ -6,6 +6,7 @@ from PIL import Image
 
 from negpy.infrastructure.loaders.factory import LoaderFactory
 from negpy.infrastructure.loaders.fff_loader import FffLoader
+from negpy.infrastructure.loaders.memory import PreviewMemoryEstimate
 from negpy.infrastructure.loaders.jpeg_loader import JpegLoader
 from negpy.infrastructure.loaders.jxl_loader import JxlLoader
 from negpy.infrastructure.loaders.nef_loader import NefLoader
@@ -119,3 +120,22 @@ def test_direct_jxl_does_not_fall_back_to_a_full_decode():
 
     assert result is None
     codec.jpegxl_decode.assert_not_called()
+
+
+def test_small_non_libraw_loaders_allow_neighbor_prefetch(tmp_path):
+    jpeg_path = str(tmp_path / "small.jpg")
+    tiff_path = str(tmp_path / "small.tif")
+    Image.fromarray(np.zeros((20, 30, 3), dtype=np.uint8)).save(jpeg_path)
+    tifffile.imwrite(tiff_path, np.zeros((20, 30, 3), dtype=np.uint16), photometric="rgb")
+    factory = LoaderFactory()
+
+    for path in (jpeg_path, tiff_path):
+        estimate = factory.estimate_preview_memory(path, 1600)
+        assert factory.allows_linear_preview_prefetch(path, estimate)
+
+
+def test_large_non_cooperative_loader_does_not_allow_neighbor_prefetch():
+    factory = LoaderFactory()
+    estimate = PreviewMemoryEstimate(16 * 1024 * 1024, 256 * 1024 * 1024 + 1, (10_000, 10_000))
+
+    assert not factory.allows_linear_preview_prefetch("large.tif", estimate)

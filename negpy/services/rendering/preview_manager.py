@@ -96,7 +96,7 @@ class PreviewManager:
         demosaic: str = DemosaicMode.AUTO,
         positive_source: bool = False,
         integrated_gpu: bool = False,
-        protected_file_hash: str | None = None,
+        protected_file_hashes: tuple[str, ...] = (),
         should_cancel: Optional[Callable[[], bool]] = None,
     ) -> bool:
         """Warm one preview when its cache and system-memory budgets both admit it."""
@@ -119,15 +119,18 @@ class PreviewManager:
         if should_cancel is not None and should_cancel():
             raise InterruptedError("preview load cancelled")
 
-        if not loader_factory.supports_cancellable_linear_preview(file_path):
-            logger.debug("preview prefetch skip: loader cannot cancel bounded linear decode %s", file_path)
+        estimate = loader_factory.estimate_preview_memory(file_path, APP_CONFIG.preview_render_size)
+        if not loader_factory.allows_linear_preview_prefetch(file_path, estimate):
+            logger.debug("preview prefetch skip: loader path is not responsive enough %s", file_path)
             return False
 
-        estimate = loader_factory.estimate_preview_memory(file_path, APP_CONFIG.preview_render_size)
-        protected_file_hashes = frozenset((protected_file_hash,)) if protected_file_hash else frozenset()
+        protected_hashes = frozenset(protected_file_hashes)
         decision = decide_prefetch(
             estimate,
-            self._cache.usage(protected_file_hashes=protected_file_hashes),
+            self._cache.usage(
+                protected_file_hashes=protected_hashes,
+                preserve_full_resolution=True,
+            ),
             available_system_memory_bytes(),
             integrated_gpu=integrated_gpu,
         )
@@ -153,7 +156,8 @@ class PreviewManager:
             half_slice=half_slice,
             demosaic=demosaic,
             positive_source=positive_source,
-            cache_protected_file_hashes=protected_file_hashes,
+            cache_protected_file_hashes=protected_hashes,
+            cache_preserve_full_resolution=True,
             should_cancel=should_cancel,
         )
         return True
@@ -211,6 +215,7 @@ class PreviewManager:
         demosaic: str = DemosaicMode.AUTO,
         positive_source: bool = False,
         cache_protected_file_hashes: frozenset[str] = frozenset(),
+        cache_preserve_full_resolution: bool = False,
         should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Tuple[ImageBuffer, Dimensions, dict]:
         """
@@ -410,6 +415,7 @@ class PreviewManager:
                 (h_orig, w_orig),
                 dict(metadata),
                 protected_file_hashes=cache_protected_file_hashes,
+                preserve_full_resolution=cache_preserve_full_resolution,
             )
         return out, (h_orig, w_orig), metadata
 
@@ -446,6 +452,7 @@ class PreviewManager:
         demosaic: str = DemosaicMode.AUTO,
         positive_source: bool = False,
         cache_protected_file_hashes: frozenset[str] = frozenset(),
+        cache_preserve_full_resolution: bool = False,
         should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Tuple[ImageBuffer, Dimensions, dict]:
         """
@@ -515,6 +522,7 @@ class PreviewManager:
                 demosaic=demosaic,
                 positive_source=positive_source,
                 cache_protected_file_hashes=cache_protected_file_hashes,
+                cache_preserve_full_resolution=cache_preserve_full_resolution,
                 should_cancel=should_cancel,
             )
         log(

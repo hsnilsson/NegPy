@@ -224,7 +224,9 @@ def test_jxl_linear_dng_allows_cancellable_neighbor_prefetch():
         path = os.path.join(td, "dxo.dng")
         _write_linear_dng_libraw_cant_read(path, h, w, codes, table)
 
-        assert LoaderFactory().supports_cancellable_linear_preview(path)
+        factory = LoaderFactory()
+        estimate = factory.estimate_preview_memory(path, 1600)
+        assert factory.allows_linear_preview_prefetch(path, estimate)
 
 
 def test_libraw_dng_does_not_allow_non_cancellable_neighbor_prefetch():
@@ -232,7 +234,9 @@ def test_libraw_dng_does_not_allow_non_cancellable_neighbor_prefetch():
         path = os.path.join(td, "camera.dng")
         _write_minimal_linearraw_dng(path, 12, 10)
 
-        assert not LoaderFactory().supports_cancellable_linear_preview(path)
+        factory = LoaderFactory()
+        estimate = factory.estimate_preview_memory(path, 1600)
+        assert not factory.allows_linear_preview_prefetch(path, estimate)
 
 
 def test_jxl_linear_dng_preview_does_not_fall_back_when_a_segment_is_too_large():
