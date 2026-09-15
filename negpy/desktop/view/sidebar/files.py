@@ -7,6 +7,7 @@ from PyQt6.QtCore import (
     QEasingCurve,
     QItemSelectionModel,
     QModelIndex,
+    QPersistentModelIndex,
     QPropertyAnimation,
     QRect,
     QRectF,
@@ -96,6 +97,7 @@ class _ThumbnailDelegate(QStyledItemDelegate):
         self._placeholder_icon = qta.icon("fa5s.image", color=THEME.text_muted)
         self._activity_icon = qta.icon("fa5s.image", color=THEME.text_secondary)
         self._activity_key = ""
+        self._activity_index = QPersistentModelIndex()
         self._activity_phase = 0.0
         self._activity_timer = QTimer(self)
         self._activity_timer.setInterval(self._ACTIVITY_INTERVAL_MS)
@@ -105,12 +107,15 @@ class _ThumbnailDelegate(QStyledItemDelegate):
     def set_activity(self, key: str) -> None:
         if key == self._activity_key:
             return
+        previous = self._activity_index
         self._activity_key = key
+        self._activity_index = self._find_activity_index()
         self._activity_phase = 0.0
         if key:
             self._activity_timer.start()
         else:
             self._activity_timer.stop()
+        self._repaint_index(previous)
         self._repaint_view()
 
     def _advance_activity(self) -> None:
@@ -118,9 +123,34 @@ class _ThumbnailDelegate(QStyledItemDelegate):
         self._repaint_view()
 
     def _repaint_view(self) -> None:
+        if not self._index_matches_activity(self._activity_index):
+            self._activity_index = self._find_activity_index()
+        self._repaint_index(self._activity_index)
+
+    def _find_activity_index(self) -> QPersistentModelIndex:
         view = self.parent()
-        if isinstance(view, QListView):
-            view.viewport().update()
+        if not isinstance(view, QListView) or not self._activity_key:
+            return QPersistentModelIndex()
+        model = view.model()
+        if model is None:
+            return QPersistentModelIndex()
+        for row in range(model.rowCount()):
+            index = model.index(row, 0)
+            file_info = index.data(Qt.ItemDataRole.UserRole) or {}
+            if file_info.get("hash") and asset_thumbnail_key(file_info) == self._activity_key:
+                return QPersistentModelIndex(index)
+        return QPersistentModelIndex()
+
+    def _index_matches_activity(self, index: QPersistentModelIndex) -> bool:
+        if not index.isValid() or not self._activity_key:
+            return False
+        file_info = index.data(Qt.ItemDataRole.UserRole) or {}
+        return bool(file_info.get("hash") and asset_thumbnail_key(file_info) == self._activity_key)
+
+    def _repaint_index(self, index: QPersistentModelIndex) -> None:
+        view = self.parent()
+        if isinstance(view, QListView) and index.isValid():
+            view.viewport().update(view.visualRect(QModelIndex(index)))
 
     def _is_dirty(self, file_info: dict) -> bool:
         """Only the active file can carry unsaved edits; every other frame is on disk."""

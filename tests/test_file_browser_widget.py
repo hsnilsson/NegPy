@@ -708,6 +708,24 @@ def test_active_placeholder_curtain_advances_across_the_glyph(qapp):
     assert early != late
 
 
+def test_placeholder_animation_repaints_only_the_active_cell(session, qapp):
+    view = ThumbnailGridView(target_cell=THUMB_CELL_MIN)
+    view.resize(320, 240)
+    view.setModel(session.asset_model)
+    delegate = _ThumbnailDelegate(view, state=session.state)
+    view.setItemDelegate(delegate)
+    view.show()
+    qapp.processEvents()
+    delegate.set_activity(asset_thumbnail_key(session.state.uploaded_files[1]))
+    delegate._activity_timer.stop()
+
+    with patch.object(view.viewport(), "update") as update:
+        delegate._advance_activity()
+
+    update.assert_called_once()
+    assert update.call_args.args == (view.visualRect(QModelIndex(delegate._activity_index)),)
+
+
 def _badge_corner(image: QImage) -> list:
     """The 18px badge box at the bottom-left of the image outline. A 60x40 thumbnail in
     a 120px cell lands at (3, 22, 114, 76), so the chip spans roughly (7, 75)-(25, 93)."""
