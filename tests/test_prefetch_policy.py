@@ -1,4 +1,8 @@
 from unittest.mock import MagicMock, patch
+from dataclasses import replace
+
+import numpy as np
+import tifffile
 
 from negpy.infrastructure.loaders.memory import PreviewMemoryEstimate
 from negpy.services.rendering.prefetch_policy import decide_prefetch
@@ -114,6 +118,18 @@ def test_prefetch_rejects_a_non_cancellable_loader_before_decode() -> None:
 
     assert not admitted
     estimate.assert_called_once_with("/camera.dng", 1600)
+    manager.load_linear_preview.assert_not_called()
+
+
+def test_prefetch_budgets_retained_ir_before_decode(tmp_path) -> None:
+    path = tmp_path / "rgbi.tif"
+    tifffile.imwrite(path, np.zeros((100, 150, 4), dtype=np.uint16), photometric="rgb", extrasamples=[0])
+    manager = PreviewManager()
+    manager._cache._app = replace(manager._cache._app, preview_cache_max_bytes=200_000)
+    manager.load_linear_preview = MagicMock()
+    with patch("negpy.services.rendering.preview_manager.available_system_memory_bytes", return_value=4 * 1024**3):
+        admitted = manager.prefetch_linear_preview(str(path), "Adobe RGB", use_camera_wb=False, file_hash="rgbi")
+    assert not admitted
     manager.load_linear_preview.assert_not_called()
 
 

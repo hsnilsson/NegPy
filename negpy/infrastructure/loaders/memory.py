@@ -96,4 +96,11 @@ def estimate_preview_memory(file_path: str, max_edge: int, profile: str) -> Prev
     floor_bytes = _PROFILE_FLOOR_BYTES.get(profile, _PROFILE_FLOOR_BYTES["raw"])
     encoded_bytes = file_bytes * 2 if dimensions is not None else file_bytes * file_multiplier
     temporary_bytes = max(source_pixels * bytes_per_pixel, encoded_bytes, floor_bytes)
+    # Decoded previews can retain a separate detection plane and the source IR plane.
+    if dimensions is None or source_pixels * 3 * 4 > cached_bytes:
+        cached_bytes *= 2
+        if profile != "display":
+            cached_bytes += cached_width * cached_height * 4 if dimensions is not None else edge * edge * 4
+    if profile != "display":
+        cached_bytes += source_pixels * 4 if dimensions is not None else temporary_bytes
     return PreviewMemoryEstimate(cached_bytes, temporary_bytes, dimensions)
