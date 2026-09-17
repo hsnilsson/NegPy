@@ -194,6 +194,32 @@ def test_flatfield_is_applied_before_the_lens_warp(monkeypatch):
     np.testing.assert_array_equal(image, 1.0)
 
 
+@pytest.mark.parametrize(
+    "warp",
+    [
+        SonyWarp(ca_red=(100,) * 16, ca_blue=(-100,) * 16),
+        RectilinearWarp(((1.01, 0, 0, 0, 0, 0), IDENTITY, (0.99, 0, 0, 0, 0, 0))),
+    ],
+)
+def test_lens_preserves_flatfield_values_above_one_for_sensor_unmix(monkeypatch, warp):
+    from negpy.features.flatfield import logic as ff
+    from negpy.features.process.sensor import apply_sensor_correction, build_sensor_matrix
+
+    image = np.full((40, 60, 3), 0.8, np.float32)
+    gain = np.full_like(image, 1.6)
+    monkeypatch.setitem(ff._GAIN_CACHE, "reference", (gain, "gain-token"))
+    flatfield = FlatFieldConfig(apply=True, profile_id="reference")
+    lens = LensMetadata("Test", (warp,))
+    out = prepare_lens_source(image, {"lens_correction": lens, "orientation": 1}, flatfield)
+    np.testing.assert_allclose(out, image * gain, atol=1e-6)
+
+    matrix = build_sensor_matrix((1, 0.25, 0.25), (0.25, 1, 0.25), (0.25, 0.25, 1))
+    expected = apply_sensor_correction(image * gain, matrix)
+    assert expected.max() < 1.0
+    np.testing.assert_allclose(apply_sensor_correction(out, matrix), expected, atol=1e-6)
+    np.testing.assert_array_equal(image, np.float32(0.8))
+
+
 def test_setting_roundtrip_and_source_cache_identity(monkeypatch):
     from negpy.features.flatfield import logic as ff
 
@@ -251,6 +277,61 @@ def test_composites_do_not_apply_primary_lens_metadata():
     assert not metadata_lens_enabled(replace(config, hdr=HdrConfig(hdr_enabled=True, hdr_paths=("b.arw",))))
     assert not metadata_lens_enabled(replace(config, rgbscan=RgbScanConfig(enabled=True, green_path="g.arw", blue_path="b.arw")))
     assert not metadata_lens_enabled(replace(config, stitch=StitchConfig(stitch_enabled=True, stitch_paths=("b.arw",))))
+
+
+@pytest.mark.parametrize("kind", ["stitch", "hdr"])
+def test_composite_solve_uses_unwarped_sources(monkeypatch, kind):
+    from negpy.desktop.workers import hdr, stitch
+    from negpy.features.flatfield import logic as ff
+    from negpy.services.rendering.image_processor import ImageProcessor
+
+    rng = np.random.default_rng(7)
+    sources = {path: rng.integers(6500, 40000, (60, 80, 3), dtype=np.uint16) for path in ("a.dng", "b.dng")}
+    lens = LensMetadata("DNG", (RectilinearWarp(((1, -0.1, 0, 0, 0, 0),)),))
+    monkeypatch.setattr(
+        ImageProcessor,
+        "_decode_sensor_rgb",
+        lambda self, path, *args, **kwargs: (sources[path].copy(), {"lens_correction": lens, "orientation": 1}),
+    )
+    monkeypatch.setitem(ff._GAIN_CACHE, "reference", (np.full((60, 80, 3), 1.1, np.float32), "gain-token"))
+    config = replace(
+        WorkspaceConfig(),
+        geometry=GeometryConfig(lens_from_metadata=True),
+        flatfield=FlatFieldConfig(apply=True, profile_id="reference"),
+    )
+    seen = []
+
+    def solve(buffers, *args, **kwargs):
+        seen.extend(buffer.copy() for buffer in buffers)
+        if kind == "stitch":
+            return [np.eye(2, 3), np.eye(2, 3)], (80, 60)
+        return [1.0, 2.0]
+
+    if kind == "stitch":
+        monkeypatch.setattr(stitch, "register_parts", solve)
+        worker, task_type = stitch.StitchWorker(), stitch.StitchTask
+        completed = worker.registered
+    else:
+        monkeypatch.setattr(hdr, "solve_ratios", solve)
+        worker, task_type = hdr.HdrWorker(), hdr.HdrTask
+        completed = worker.solved
+    results, errors = [], []
+    completed.connect(results.append)
+    worker.error.connect(errors.append)
+    worker.run(
+        task_type(
+            files=tuple({"path": path, "name": path} for path in sources),
+            params_by_path={path: config for path in sources},
+        )
+    )
+    assert not errors and len(results) == 1
+    assert len(seen) == len(sources)
+    for actual, source in zip(seen, sources.values()):
+        expected = source.astype(np.float32) / 65535.0
+        if kind == "stitch":
+            expected *= 1.1
+        np.testing.assert_array_equal(actual, expected)
+    assert config.geometry.lens_from_metadata
 
 
 def test_preview_and_export_share_warp_flatfield_and_per_file_coefficients(tmp_path, monkeypatch):

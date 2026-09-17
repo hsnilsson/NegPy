@@ -23,5 +23,6 @@ def apply_lens(img: ImageBuffer, lens: LensMetadata, orientation: int = 1) -> Im
                 stop = min(start + 256, h)
                 mx, my = warp.remap(lens, source.shape, start, stop, channel)
                 result[start:stop, :, channel] = cv2.remap(plane, mx, my, cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-        source = np.clip(result, 0.0, 1.0, out=result)
+        # Flat-field gains can exceed white before sensor unmix.
+        source = np.maximum(result, 0.0, out=result)
     return np.ascontiguousarray(apply_exif_orientation(source, orientation))
