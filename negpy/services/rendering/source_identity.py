@@ -20,7 +20,7 @@ from negpy.features.process.logic import (
 )
 from negpy.features.rgbscan.logic import rgbscan_token
 from negpy.features.stitch.models import stitch_token
-from negpy.services.rendering.lens import lens_decode_token, metadata_lens_enabled
+from negpy.services.rendering.lens import lens_decode_token, metadata_lens_corrections
 
 
 def source_token(config: WorkspaceConfig) -> str:
@@ -40,7 +40,7 @@ def source_token(config: WorkspaceConfig) -> str:
         rgbscan_token(config.rgbscan),
         stitch_token(config.stitch),
         hdr_token(config.hdr),
-        lens_decode_token(metadata_lens_enabled(config), config.flatfield),
+        lens_decode_token(metadata_lens_corrections(config), config.flatfield),
     ]
     if config.stitch.stitch_enabled:
         # Stitch flat-fields each part before assembly; embedded lens mode carries this

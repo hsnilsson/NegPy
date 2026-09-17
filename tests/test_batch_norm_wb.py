@@ -10,6 +10,7 @@ import numpy as np
 
 from negpy.desktop.workers.render import NormalizationInput, NormalizationTask, NormalizationWorker
 from negpy.domain.models import WorkspaceConfig
+from negpy.features.lens.models import LensCorrections
 
 
 class _FakePreviewService:
@@ -29,7 +30,7 @@ class _FakePreviewService:
         positive_source=False,
         highlight_mode=0,
         bake_camera_wb=False,
-        lens_from_metadata=False,
+        lens_corrections=LensCorrections(),
         lens_flatfield=None,
     ):
         self.calls[file_hash] = use_camera_wb

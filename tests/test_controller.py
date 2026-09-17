@@ -299,6 +299,7 @@ class TestAppController(unittest.TestCase):
 
     def test_lens_toggles_keep_the_displayed_texture_during_reload(self):
         from negpy.infrastructure.gpu.resources import GPUTexture
+        from negpy.features.lens.models import LensCorrections
         from negpy.services.rendering.lens import lens_decode_token
 
         self.controller.preview_load_requested.disconnect(self.controller.preview_load_worker.process)
@@ -314,14 +315,21 @@ class TestAppController(unittest.TestCase):
         self.controller.preview_load_requested.connect(decode)
         self.controller.zoom_requested.connect(zoom)
 
-        for enabled in (True, False, True):
-            state.config = replace(state.config, geometry=replace(state.config.geometry, lens_from_metadata=enabled))
-            state.preview_lens_token = lens_decode_token(not enabled, state.config.flatfield)
+        previous = LensCorrections()
+        for corrections in (LensCorrections(True, False), LensCorrections(True, True), LensCorrections(False, True), LensCorrections()):
+            state.config = replace(
+                state.config,
+                geometry=replace(
+                    state.config.geometry, lens_distortion_from_metadata=corrections.distortion, lens_ca_from_metadata=corrections.ca
+                ),
+            )
+            state.preview_lens_token = lens_decode_token(previous, state.config.flatfield)
             self.controller.request_render()
             task = decode.call_args.args[0]
-            self.assertEqual(task.lens_from_metadata, enabled)
+            self.assertEqual(task.lens_corrections, corrections)
             self.assertFalse(task.use_splash)
             self.assertIs(cleanup.call_args.args[0], texture)
+            previous = corrections
 
         loading.assert_not_called()
         released.assert_not_called()

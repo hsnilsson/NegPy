@@ -87,7 +87,7 @@ class HdrWorker(QObject):
                     flatfield=FlatFieldConfig(),
                     hdr=HdrConfig(),
                     process=replace(original.process, highlight_reconstruction=0),
-                    geometry=replace(original.geometry, lens_from_metadata=False),
+                    geometry=replace(original.geometry, lens_distortion_from_metadata=False, lens_ca_from_metadata=False),
                 )
                 f32, _, _ = self._processor._decode_oriented_f32(f["path"], params, wb_override=bracket_wb)
                 if i == 0:

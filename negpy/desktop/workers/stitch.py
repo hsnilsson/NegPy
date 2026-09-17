@@ -58,7 +58,9 @@ class StitchWorker(QObject):
                 self.progress.emit(i, total, f"Decoding {f['name']}")
                 # Registration and composite assembly both use unwarped sources.
                 params = task.params_by_path[f["path"]]
-                params = replace(params, geometry=replace(params.geometry, lens_from_metadata=False))
+                params = replace(
+                    params, geometry=replace(params.geometry, lens_distortion_from_metadata=False, lens_ca_from_metadata=False)
+                )
                 f32, _, _ = self._processor._decode_oriented_f32(f["path"], params)
                 parts.append(f32)
             self.progress.emit(len(task.files), total, "Registering frames")

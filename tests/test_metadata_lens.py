@@ -14,11 +14,11 @@ from negpy.domain.models import WorkspaceConfig
 from negpy.features.flatfield.models import FlatFieldConfig
 from negpy.features.geometry.models import GeometryConfig
 from negpy.features.lens.logic import apply_lens
-from negpy.features.lens.models import LensMetadata, LensWarp
+from negpy.features.lens.models import LensCorrections, LensMetadata, LensWarp
 from negpy.features.lens.warps import IDENTITY, RectilinearWarp, SonyWarp
 from negpy.infrastructure.loaders.lens_metadata import bind_decode, parse_opcodes, read_lens_metadata
 from negpy.kernel.image.logic import apply_exif_orientation
-from negpy.services.rendering.lens import lens_decode_token, metadata_lens_enabled, prepare_lens_source
+from negpy.services.rendering.lens import lens_decode_token, metadata_lens_corrections, prepare_lens_source
 from negpy.services.rendering.preview_cache import PreviewCacheKey
 from negpy.services.rendering.source_identity import source_token
 
@@ -51,6 +51,36 @@ def test_dng_identity_and_separate_capabilities():
     assert lens.available and lens.ca and not lens.distortion
     distortion = LensMetadata("DNG", parse_opcodes(opcode(((1, -0.1, 0, 0, 0, 0),))))
     assert distortion.distortion and not distortion.ca
+
+
+@pytest.mark.parametrize("distortion,ca", [(False, False), (True, False), (False, True), (True, True)])
+def test_sony_components_are_independent(distortion, ca):
+    shape = (40, 60, 3)
+    warp = SonyWarp((-1024,) * 16, (32768,) * 16, (-16384,) * 16)
+    lens = LensMetadata("Sony", (warp,))
+    y, x = np.mgrid[:40, :60].astype(np.float32)
+    for channel, ca_gain in enumerate((1 + 1 / 64, 1, 1 - 1 / 128)):
+        mx, my = warp.remap(lens, shape, 0, 40, channel, LensCorrections(distortion, ca))
+        factor = (1 - 1 / 16 if distortion else 1) * (ca_gain if ca else 1)
+        np.testing.assert_allclose(mx, (x - 30) * factor + 30, atol=1e-5)
+        np.testing.assert_allclose(my, (y - 20) * factor + 20, atol=1e-5)
+
+
+@pytest.mark.parametrize("common", [(0.9, 0, 0, 0, 0, 0), (1, -0.3, 0, 0, 0, 0), (1.02, 0.1, 0.02, 0.001, 0.003, -0.002)])
+def test_dng_ca_only_preserves_green_geometry_with_crop_and_off_center_lens(common):
+    warp = RectilinearWarp(tuple(tuple(v * scale for v in common) for scale in (1.02, 1, 0.98)), (0.37, 0.61))
+    lens = LensMetadata("DNG", (warp,), active_area=(4, 8, 104, 168), buffer_area=(10, 20, 90, 140))
+    y, x = np.mgrid[:40, :60].astype(np.float32)
+    cx = (8 + 0.37 * 159 - 20 + 0.5) / 2 - 0.5
+    cy = (4 + 0.61 * 99 - 10 + 0.5) / 2 - 0.5
+    for channel, factor in enumerate((1.02, 1, 0.98)):
+        mx, my = warp.remap(lens, (40, 60, 3), 0, 40, channel, LensCorrections(ca=True))
+        np.testing.assert_allclose(mx, (x - cx) * factor + cx, atol=1e-4)
+        np.testing.assert_allclose(my, (y - cy) * factor + cy, atol=1e-4)
+        dx, dy = warp.remap(lens, (40, 60, 3), 0, 40, channel, LensCorrections(distortion=True))
+        gx, gy = warp.remap(lens, (40, 60, 3), 0, 40, 1)
+        np.testing.assert_array_equal(dx, gx)
+        np.testing.assert_array_equal(dy, gy)
 
 
 @pytest.mark.parametrize("byteorder", ["<", ">"])
@@ -220,22 +250,33 @@ def test_lens_preserves_flatfield_values_above_one_for_sensor_unmix(monkeypatch,
     np.testing.assert_array_equal(image, np.float32(0.8))
 
 
-def test_setting_roundtrip_and_source_cache_identity(monkeypatch):
+@pytest.mark.parametrize("distortion,ca", [(False, False), (True, False), (False, True), (True, True)])
+def test_setting_roundtrip_and_source_cache_identity(monkeypatch, distortion, ca):
     from negpy.features.flatfield import logic as ff
 
     monkeypatch.setitem(ff._GAIN_CACHE, "reference", (np.ones((4, 6, 3), np.float32), "gain-token"))
     base = WorkspaceConfig()
-    enabled = replace(base, geometry=GeometryConfig(lens_from_metadata=True, distortion_k1=0.05))
+    enabled = replace(base, geometry=GeometryConfig(lens_distortion_from_metadata=distortion, lens_ca_from_metadata=ca, distortion_k1=0.05))
     restored = WorkspaceConfig.from_flat_dict(enabled.to_dict())
-    assert restored.geometry.lens_from_metadata
-    assert restored.geometry.distortion_k1 == 0
-    assert source_token(base) != source_token(enabled)
+    assert restored == enabled
+    assert restored.geometry.distortion_k1 == (0 if distortion else 0.05)
+    assert (source_token(base) != source_token(enabled)) == (distortion or ca)
     flat = FlatFieldConfig(apply=True, profile_id="reference")
-    assert source_token(enabled) != source_token(replace(enabled, flatfield=flat))
+    assert (source_token(enabled) != source_token(replace(enabled, flatfield=flat))) == (distortion or ca)
     assert source_token(base) == source_token(replace(base, flatfield=flat))
     off = PreviewCacheKey("file", False, "sRGB", False)
-    on = replace(off, lens_token=lens_decode_token(True, flat))
-    assert off.as_tuple() != on.as_tuple()
+    on = replace(off, lens_token=lens_decode_token(LensCorrections(distortion, ca), flat))
+    assert (off.as_tuple() != on.as_tuple()) == (distortion or ca)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_combined_saved_lens_mode_migrates_without_overriding_split_settings(enabled):
+    config = WorkspaceConfig.from_flat_dict({"lens_from_metadata": enabled})
+    assert config.geometry.lens_distortion_from_metadata is enabled
+    assert config.geometry.lens_ca_from_metadata is enabled
+    explicit = WorkspaceConfig.from_flat_dict({"lens_from_metadata": enabled, "lens_ca_from_metadata": not enabled})
+    assert explicit.geometry.lens_ca_from_metadata is not enabled
+    assert "lens_from_metadata" not in config.to_dict()
 
 
 def test_sidebar_uses_source_capabilities_and_can_clear_unavailable_saved_mode(qapp, monkeypatch):
@@ -246,25 +287,41 @@ def test_sidebar_uses_source_capabilities_and_can_clear_unavailable_saved_mode(q
     monkeypatch.setattr(geometry, "read_lens_metadata", lambda path: LensMetadata())
     sidebar = GeometrySidebar(controller)
     sidebar.sync_ui()
-    assert not sidebar.metadata_lens_btn.isEnabled()
+    assert not sidebar.metadata_distortion_btn.isEnabled()
+    assert not sidebar.metadata_ca_btn.isEnabled()
     assert sidebar.distortion_slider.isEnabled()
     ca = LensMetadata("Sony", (SonyWarp(ca_red=(100,) * 16, ca_blue=(-100,) * 16),))
     monkeypatch.setattr(geometry, "read_lens_metadata", lambda path: ca)
     sidebar.sync_ui()
-    assert sidebar.metadata_lens_btn.isEnabled()
+    assert not sidebar.metadata_distortion_btn.isEnabled()
+    assert sidebar.metadata_ca_btn.isEnabled()
     assert "lateral CA" in sidebar.lens_hint.text()
     assert "distortion" not in sidebar.lens_hint.text()
-    sidebar.metadata_lens_btn.click()
+    sidebar.metadata_ca_btn.click()
     requested = controller.apply_config.call_args.args[0]
-    assert requested.geometry.lens_from_metadata
+    assert requested.geometry.lens_ca_from_metadata
+    assert not requested.geometry.lens_distortion_from_metadata
     controller.state.config = requested
+    sidebar.sync_ui()
+    assert sidebar.distortion_slider.isEnabled()
     monkeypatch.setattr(geometry, "read_lens_metadata", lambda path: LensMetadata())
     sidebar.sync_ui()
-    assert sidebar.metadata_lens_btn.isEnabled()
-    assert sidebar.metadata_lens_btn.isChecked()
+    assert sidebar.metadata_ca_btn.isEnabled()
+    assert sidebar.metadata_ca_btn.isChecked()
     assert "Unavailable" in sidebar.lens_hint.text()
-    sidebar.metadata_lens_btn.click()
-    assert not controller.apply_config.call_args.args[0].geometry.lens_from_metadata
+    sidebar.metadata_ca_btn.click()
+    assert not controller.apply_config.call_args.args[0].geometry.lens_ca_from_metadata
+
+    distortion = LensMetadata("Sony", (SonyWarp(distortion=(100,) * 16),))
+    controller.state.config = WorkspaceConfig()
+    monkeypatch.setattr(geometry, "read_lens_metadata", lambda path: distortion)
+    sidebar.sync_ui()
+    assert sidebar.metadata_distortion_btn.isEnabled()
+    assert not sidebar.metadata_ca_btn.isEnabled()
+    sidebar.metadata_distortion_btn.click()
+    controller.state.config = controller.apply_config.call_args.args[0]
+    sidebar.sync_ui()
+    assert not sidebar.distortion_slider.isEnabled()
 
 
 def test_composites_do_not_apply_primary_lens_metadata():
@@ -272,11 +329,11 @@ def test_composites_do_not_apply_primary_lens_metadata():
     from negpy.features.rgbscan.models import RgbScanConfig
     from negpy.features.stitch.models import StitchConfig
 
-    config = replace(WorkspaceConfig(), geometry=GeometryConfig(lens_from_metadata=True))
-    assert metadata_lens_enabled(config)
-    assert not metadata_lens_enabled(replace(config, hdr=HdrConfig(hdr_enabled=True, hdr_paths=("b.arw",))))
-    assert not metadata_lens_enabled(replace(config, rgbscan=RgbScanConfig(enabled=True, green_path="g.arw", blue_path="b.arw")))
-    assert not metadata_lens_enabled(replace(config, stitch=StitchConfig(stitch_enabled=True, stitch_paths=("b.arw",))))
+    config = replace(WorkspaceConfig(), geometry=GeometryConfig(lens_distortion_from_metadata=True, lens_ca_from_metadata=True))
+    assert metadata_lens_corrections(config)
+    assert not metadata_lens_corrections(replace(config, hdr=HdrConfig(hdr_enabled=True, hdr_paths=("b.arw",))))
+    assert not metadata_lens_corrections(replace(config, rgbscan=RgbScanConfig(enabled=True, green_path="g.arw", blue_path="b.arw")))
+    assert not metadata_lens_corrections(replace(config, stitch=StitchConfig(stitch_enabled=True, stitch_paths=("b.arw",))))
 
 
 @pytest.mark.parametrize("kind", ["stitch", "hdr"])
@@ -296,7 +353,7 @@ def test_composite_solve_uses_unwarped_sources(monkeypatch, kind):
     monkeypatch.setitem(ff._GAIN_CACHE, "reference", (np.full((60, 80, 3), 1.1, np.float32), "gain-token"))
     config = replace(
         WorkspaceConfig(),
-        geometry=GeometryConfig(lens_from_metadata=True),
+        geometry=GeometryConfig(lens_distortion_from_metadata=True, lens_ca_from_metadata=True),
         flatfield=FlatFieldConfig(apply=True, profile_id="reference"),
     )
     seen = []
@@ -331,7 +388,7 @@ def test_composite_solve_uses_unwarped_sources(monkeypatch, kind):
         if kind == "stitch":
             expected *= 1.1
         np.testing.assert_array_equal(actual, expected)
-    assert config.geometry.lens_from_metadata
+    assert config.geometry.lens_distortion_from_metadata
 
 
 def test_preview_and_export_share_warp_flatfield_and_per_file_coefficients(tmp_path, monkeypatch):
@@ -363,7 +420,7 @@ def test_preview_and_export_share_warp_flatfield_and_per_file_coefficients(tmp_p
     config = WorkspaceConfig()
     config = replace(
         config,
-        geometry=GeometryConfig(lens_from_metadata=True),
+        geometry=GeometryConfig(lens_distortion_from_metadata=True, lens_ca_from_metadata=True),
         process=replace(config.process, linear_raw=True),
         flatfield=FlatFieldConfig(apply=True, profile_id="test-gain"),
     )
@@ -376,7 +433,7 @@ def test_preview_and_export_share_warp_flatfield_and_per_file_coefficients(tmp_p
             color_space="Adobe RGB",
             full_resolution=True,
             file_hash=path,
-            lens_from_metadata=True,
+            lens_corrections=LensCorrections(True, True),
             lens_flatfield=config.flatfield,
         )
         exported, _, _ = processor._load_source_f32(path, config)
@@ -446,8 +503,12 @@ def test_dng_17_jpegxl_fallback_keeps_preview_export_and_optical_center_in_sync(
         assert metadata["lens_correction"].available
         assert metadata["lens_correction"].buffer_area == (6, 11, 94, 149)
     config = WorkspaceConfig()
-    config = replace(config, geometry=GeometryConfig(lens_from_metadata=True), process=replace(config.process, linear_raw=True))
-    preview, _, _ = PreviewManager().load_linear_preview(str(path), full_resolution=True, lens_from_metadata=True)
+    config = replace(
+        config,
+        geometry=GeometryConfig(lens_distortion_from_metadata=True, lens_ca_from_metadata=True),
+        process=replace(config.process, linear_raw=True),
+    )
+    preview, _, _ = PreviewManager().load_linear_preview(str(path), full_resolution=True, lens_corrections=LensCorrections(True, True))
     exported, _, _ = ImageProcessor()._load_source_f32(str(path), config)
     assert preview.shape == (88, 138, 3)
     np.testing.assert_array_equal(preview, exported)
@@ -458,8 +519,8 @@ def test_history_or_reset_reloads_pixels_when_metadata_mode_changes(enabled):
     from negpy.desktop.controller import AppController
 
     state = AppState(current_file_path="scan.arw")
-    state.config = replace(state.config, geometry=GeometryConfig(lens_from_metadata=enabled))
-    state.preview_lens_token = lens_decode_token(not enabled, state.config.flatfield)
+    state.config = replace(state.config, geometry=GeometryConfig(lens_distortion_from_metadata=enabled, lens_ca_from_metadata=enabled))
+    state.preview_lens_token = lens_decode_token(LensCorrections(not enabled, not enabled), state.config.flatfield)
     controller = SimpleNamespace(state=state, _render_debounce=MagicMock(), load_file=MagicMock())
     AppController.request_render(controller)
     controller.load_file.assert_called_once_with("scan.arw", preserve_zoom=True)
@@ -476,19 +537,20 @@ def test_positive_source_and_lens_mode_have_independent_preview_cache_entries(tm
     path = str(tmp_path / "source.arw")
     ramp = np.tile(np.linspace(0.1, 0.7, 120, dtype=np.float32), (80, 1))
     image = np.repeat(ramp[..., None], 3, axis=2)
-    lens = LensMetadata("Sony", (SonyWarp((-1000,) * 16),))
+    lens = LensMetadata("Sony", (SonyWarp((-1000,) * 16, (32768,) * 16, (-16384,) * 16),))
 
     def get_loader(file_path, *, linear_raw=False, positive_source=False):
         pixels = image * (0.5 if positive_source else 1.0)
         return NonStandardFileWrapper(pixels), {"orientation": 1, "color_space": "Adobe RGB", "lens_correction": lens}
 
     monkeypatch.setattr(factory.loader_factory, "get_loader", get_loader)
-    monkeypatch.setattr("negpy.services.rendering.preview_manager.APP_CONFIG.preview_cache_max_full_res_entries", 4)
+    monkeypatch.setattr("negpy.services.rendering.preview_manager.APP_CONFIG.preview_cache_max_full_res_entries", 8)
     manager = PreviewManager()
     processor = ImageProcessor()
     load = manager.load_splash_and_linear if splash else manager.load_linear_preview
     outputs = {}
-    for positive, enabled in [(False, False), (False, True), (True, False), (True, True)] * 2:
+    modes = [LensCorrections(d, ca) for d in (False, True) for ca in (False, True)]
+    for positive, corrections in [(positive, mode) for positive in (False, True) for mode in modes] * 2:
         result = load(
             path,
             color_space=color_space,
@@ -496,22 +558,21 @@ def test_positive_source_and_lens_mode_have_independent_preview_cache_entries(tm
             full_resolution=True,
             file_hash="source",
             positive_source=positive,
-            lens_from_metadata=enabled,
+            lens_corrections=corrections,
         )
         preview = result[1][0] if splash else result[0]
         config = WorkspaceConfig()
         config = replace(
             config,
-            geometry=GeometryConfig(lens_from_metadata=enabled),
+            geometry=GeometryConfig(lens_distortion_from_metadata=corrections.distortion, lens_ca_from_metadata=corrections.ca),
             process=replace(config.process, linear_raw=True, positive_source=positive),
         )
         exported, _, _ = processor._load_source_f32(path, config)
         np.testing.assert_allclose(preview, exported, atol=1e-6)
-        if (positive, enabled) in outputs:
-            assert preview is outputs[positive, enabled]
-        outputs[positive, enabled] = preview
-    assert not np.array_equal(outputs[False, False], outputs[False, True])
-    assert not np.array_equal(outputs[False, True], outputs[True, True])
+        if (positive, corrections) in outputs:
+            assert preview is outputs[positive, corrections]
+        outputs[positive, corrections] = preview
+    assert len({out.tobytes() for out in outputs.values()}) == 8
 
 
 @pytest.mark.parametrize("mode", ["linear", "splash", "warm"])
@@ -527,7 +588,7 @@ def test_preview_worker_forwards_positive_source_and_lens_settings(mode):
         workspace_color_space="Adobe RGB",
         use_camera_wb=False,
         positive_source=True,
-        lens_from_metadata=True,
+        lens_corrections=LensCorrections(True, True),
         lens_flatfield=FlatFieldConfig(apply=True, profile_id="gain"),
         use_splash=mode == "splash",
         for_cache_warm=mode == "warm",
@@ -539,7 +600,7 @@ def test_preview_worker_forwards_positive_source_and_lens_settings(mode):
     call = service.load_splash_and_linear if mode == "splash" else service.load_linear_preview
     assert call.call_count == 1
     assert call.call_args.kwargs["positive_source"] is True
-    assert call.call_args.kwargs["lens_from_metadata"] is True
+    assert call.call_args.kwargs["lens_corrections"] == LensCorrections(True, True)
     assert call.call_args.kwargs["lens_flatfield"] == task.lens_flatfield
     assert not errors
 
@@ -563,7 +624,7 @@ def test_registered_reader_and_structural_warp_use_shared_rendering(tmp_path, mo
         def has_ca(self) -> bool:
             return self.offsets[0] != self.offsets[1] or self.offsets[2] != self.offsets[1]
 
-        def remap(self, lens, shape, start, stop, channel):
+        def remap(self, lens, shape, start, stop, channel, corrections=LensCorrections(True, True)):
             calls.append((lens, shape, start, stop, channel))
             y, x = np.mgrid[start:stop, : shape[1]].astype(np.float32)
             return x + self.offsets[channel], y

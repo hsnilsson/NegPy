@@ -2,6 +2,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
+from negpy.features.lens.models import LensCorrections
 
 import negpy.desktop.workers.render as render_workers
 from negpy.desktop.workers.render import (
@@ -31,7 +32,7 @@ class _PreviewService:
         positive_source=False,  # noqa: ARG002 — accepted, not asserted on
         highlight_mode=0,  # noqa: ARG002 — accepted, not asserted on
         bake_camera_wb=False,  # noqa: ARG002 — accepted, not asserted on
-        lens_from_metadata=False,  # noqa: ARG002 — accepted, not asserted on
+        lens_corrections=LensCorrections(),  # noqa: ARG002 — accepted, not asserted on
         lens_flatfield=None,  # noqa: ARG002 — accepted, not asserted on
     ):
         self.linear_calls.append(

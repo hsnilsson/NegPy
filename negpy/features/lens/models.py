@@ -6,6 +6,15 @@ from typing import Protocol
 import numpy as np
 
 
+@dataclass(frozen=True)
+class LensCorrections:
+    distortion: bool = False
+    ca: bool = False
+
+    def __bool__(self) -> bool:
+        return self.distortion or self.ca
+
+
 class LensWarp(Protocol):
     @property
     def has_distortion(self) -> bool: ...
@@ -13,7 +22,15 @@ class LensWarp(Protocol):
     @property
     def has_ca(self) -> bool: ...
 
-    def remap(self, lens: LensMetadata, shape: tuple[int, ...], start: int, stop: int, channel: int) -> tuple[np.ndarray, np.ndarray]:
+    def remap(
+        self,
+        lens: LensMetadata,
+        shape: tuple[int, ...],
+        start: int,
+        stop: int,
+        channel: int,
+        corrections: LensCorrections = LensCorrections(True, True),
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Return float32 inverse x/y maps for one channel and rows [start, stop)."""
         ...
 

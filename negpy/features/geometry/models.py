@@ -102,7 +102,8 @@ class AutocropMode(StrEnum):
 
 @dataclass(frozen=True)
 class GeometryConfig:
-    lens_from_metadata: bool = False
+    lens_distortion_from_metadata: bool = False
+    lens_ca_from_metadata: bool = False
     rotation: int = 0
     fine_rotation: float = 0.0
     flip_horizontal: bool = False
@@ -139,7 +140,7 @@ class GeometryConfig:
         """Ensure a JSON-loaded list is converted back to a tuple, keeping the
         frozen dataclass hashable for pipeline cache keys. Enum fields coerce so a
         retired or hand-edited saved value degrades to the default, not a load failure."""
-        if self.lens_from_metadata:
+        if self.lens_distortion_from_metadata:
             object.__setattr__(self, "distortion_k1", 0.0)
         if self.crop_rect is not None:
             object.__setattr__(self, "crop_rect", tuple(self.crop_rect))

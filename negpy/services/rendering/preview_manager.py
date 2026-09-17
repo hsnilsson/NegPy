@@ -27,6 +27,7 @@ from negpy.kernel.system.config import APP_CONFIG
 from negpy.kernel.system.override import effective_max_texture_size
 from negpy.features.flatfield.logic import apply_flatfield, flatfield_token
 from negpy.features.flatfield.models import FlatFieldConfig
+from negpy.features.lens.models import LensCorrections
 from negpy.services.rendering.lens import lens_decode_token, prepare_lens_source
 from negpy.features.retouch.logic import downsample_ir
 from negpy.features.hdr.logic import apply_render_exposure, merge_providers, resolve_anchor
@@ -230,7 +231,7 @@ class PreviewManager:
         highlight_mode: int = 0,
         bake_camera_wb: bool = False,
         wb_override: Optional[Sequence[float]] = None,
-        lens_from_metadata: bool = False,
+        lens_corrections: LensCorrections = LensCorrections(),
         lens_flatfield: FlatFieldConfig = FlatFieldConfig(),
     ) -> Tuple[ImageBuffer, Dimensions, dict]:
         """
@@ -342,8 +343,8 @@ class PreviewManager:
         # Bake EXIF orientation into the buffer (postprocess runs with user_flip=0).
         orientation = metadata.get("orientation", 1)
         full_linear = apply_exif_orientation(uint16_to_float32(np.ascontiguousarray(rgb)), orientation)
-        if lens_from_metadata:
-            full_linear = prepare_lens_source(full_linear, metadata, lens_flatfield)
+        if lens_corrections:
+            full_linear = prepare_lens_source(full_linear, metadata, lens_flatfield, lens_corrections)
         del rgb  # release the uint16 decode buffer before the resize/copy peak
         if should_cancel is not None and should_cancel():
             raise InterruptedError("preview load cancelled")
@@ -451,7 +452,7 @@ class PreviewManager:
                 workspace_color_space=color_space,
                 full_resolution=full_resolution,
                 demosaic=demosaic,
-                lens_token=lens_decode_token(lens_from_metadata, lens_flatfield),
+                lens_token=lens_decode_token(lens_corrections, lens_flatfield),
                 half=half_slice[0] if half_slice else 0,
                 split_x=half_slice[1] if half_slice else 0.5,
                 crop_rect=half_slice[2] if half_slice else None,
@@ -511,7 +512,7 @@ class PreviewManager:
         highlight_mode: int = 0,
         bake_camera_wb: bool = False,
         wb_override: Optional[Sequence[float]] = None,
-        lens_from_metadata: bool = False,
+        lens_corrections: LensCorrections = LensCorrections(),
         lens_flatfield: FlatFieldConfig = FlatFieldConfig(),
     ) -> Tuple[ImageBuffer, Dimensions, dict]:
         """
@@ -536,7 +537,7 @@ class PreviewManager:
                 workspace_color_space=color_space,
                 full_resolution=full_resolution,
                 demosaic=demosaic,
-                lens_token=lens_decode_token(lens_from_metadata, lens_flatfield),
+                lens_token=lens_decode_token(lens_corrections, lens_flatfield),
                 half=half_slice[0] if half_slice else 0,
                 split_x=half_slice[1] if half_slice else 0.5,
                 crop_rect=half_slice[2] if half_slice else None,
@@ -568,7 +569,7 @@ class PreviewManager:
                     workspace_color_space=color_space,
                     full_resolution=full_resolution,
                     demosaic=demosaic,
-                    lens_token=lens_decode_token(lens_from_metadata, lens_flatfield),
+                    lens_token=lens_decode_token(lens_corrections, lens_flatfield),
                     half=half_slice[0] if half_slice else 0,
                     split_x=half_slice[1] if half_slice else 0.5,
                     crop_rect=half_slice[2] if half_slice else None,
@@ -602,7 +603,7 @@ class PreviewManager:
                 highlight_mode=highlight_mode,
                 bake_camera_wb=bake_camera_wb,
                 wb_override=wb_override,
-                lens_from_metadata=lens_from_metadata,
+                lens_corrections=lens_corrections,
                 lens_flatfield=lens_flatfield,
             )
         log(
@@ -911,7 +912,7 @@ class PreviewManager:
         should_cancel: Optional[Callable[[], bool]] = None,
         highlight_mode: int = 0,
         bake_camera_wb: bool = False,
-        lens_from_metadata: bool = False,
+        lens_corrections: LensCorrections = LensCorrections(),
         lens_flatfield: FlatFieldConfig = FlatFieldConfig(),
     ) -> Tuple[Optional[Tuple[ImageBuffer, Dimensions]], Tuple[ImageBuffer, Dimensions, dict]]:
         """
@@ -934,7 +935,7 @@ class PreviewManager:
                 workspace_color_space=color_space,
                 full_resolution=full_resolution,
                 demosaic=demosaic,
-                lens_token=lens_decode_token(lens_from_metadata, lens_flatfield),
+                lens_token=lens_decode_token(lens_corrections, lens_flatfield),
                 half=half_slice[0] if half_slice else 0,
                 split_x=half_slice[1] if half_slice else 0.5,
                 crop_rect=half_slice[2] if half_slice else None,
@@ -970,7 +971,7 @@ class PreviewManager:
                     workspace_color_space=color_space,
                     full_resolution=full_resolution,
                     demosaic=demosaic,
-                    lens_token=lens_decode_token(lens_from_metadata, lens_flatfield),
+                    lens_token=lens_decode_token(lens_corrections, lens_flatfield),
                     half=half_slice[0] if half_slice else 0,
                     split_x=half_slice[1] if half_slice else 0.5,
                     crop_rect=half_slice[2] if half_slice else None,
@@ -988,7 +989,7 @@ class PreviewManager:
         log = logger.info if log_timings else logger.debug
         splash_result: Optional[Tuple[ImageBuffer, Dimensions]] = None
         with ctx_mgr as raw:
-            if not full_resolution and not lens_from_metadata:
+            if not full_resolution and not lens_corrections:
                 splash_result = self._try_splash_from_open_raw(raw, file_path, half_slice=half_slice)
             linear_result = self._load_from_open_raw(
                 raw,
@@ -1005,7 +1006,7 @@ class PreviewManager:
                 should_cancel=should_cancel,
                 highlight_mode=highlight_mode,
                 bake_camera_wb=bake_camera_wb,
-                lens_from_metadata=lens_from_metadata,
+                lens_corrections=lens_corrections,
                 lens_flatfield=lens_flatfield,
             )
         log(
