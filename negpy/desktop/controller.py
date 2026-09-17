@@ -1849,6 +1849,7 @@ class AppController(QObject):
         self._foreground_preview_generation = self._prefetch_gen
         self._pause_background_thumbnails()
         self._preview_load_t0 = time.perf_counter()
+        keep_preview = preserve_zoom and self._requested_file_path == file_path
         self._requested_file_path = file_path
         # A strip belongs to one frame, and the memo fast path below repaints without
         # going through request_render, so drop it here too. Zone pins froze their sample
@@ -1866,7 +1867,7 @@ class AppController(QObject):
 
         if not preserve_zoom:
             self.zoom_requested.emit(1.0)
-        if memo is None:
+        if memo is None and not keep_preview:
             self.loading_started.emit()
         self._thumb_config = None
 
@@ -1955,9 +1956,8 @@ class AppController(QObject):
                 # The half suffix distinguishes the two halves' preview caches now
                 # that the slice happens pre-downsample (each half is its own buffer).
                 file_hash=self._file_hash_for_path(file_path),
-                # A memoized frame is already painted, so the embedded-JPEG splash would
-                # repaint stale pixels over it.
-                use_splash=memo is None,
+                # A reload or memo hit keeps the rendered frame until its replacement is ready.
+                use_splash=memo is None and not keep_preview,
                 detect_mode=(
                     pending_import.detect_mode
                     if pending_import is not None

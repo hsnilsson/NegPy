@@ -297,6 +297,58 @@ class TestAppController(unittest.TestCase):
 
         self.assertEqual(tasks[-1].generation, self.controller._prefetch_gen)
 
+    def test_lens_toggles_keep_the_displayed_texture_during_reload(self):
+        from negpy.infrastructure.gpu.resources import GPUTexture
+        from negpy.services.rendering.lens import lens_decode_token
+
+        self.controller.preview_load_requested.disconnect(self.controller.preview_load_worker.process)
+        state = self.controller.state
+        state.current_file_path = "scan.arw"
+        self.controller._requested_file_path = state.current_file_path
+        texture = MagicMock(spec=GPUTexture)
+        state.last_metrics["base_positive"] = texture
+        loading, released, cleanup, decode, zoom = (MagicMock() for _ in range(5))
+        self.controller.loading_started.connect(loading)
+        self.controller.gpu_textures_released.connect(released)
+        self.controller._render_cleanup_requested.connect(cleanup)
+        self.controller.preview_load_requested.connect(decode)
+        self.controller.zoom_requested.connect(zoom)
+
+        for enabled in (True, False, True):
+            state.config = replace(state.config, geometry=replace(state.config.geometry, lens_from_metadata=enabled))
+            state.preview_lens_token = lens_decode_token(not enabled, state.config.flatfield)
+            self.controller.request_render()
+            task = decode.call_args.args[0]
+            self.assertEqual(task.lens_from_metadata, enabled)
+            self.assertFalse(task.use_splash)
+            self.assertIs(cleanup.call_args.args[0], texture)
+
+        loading.assert_not_called()
+        released.assert_not_called()
+        zoom.assert_not_called()
+        texture.destroy.assert_not_called()
+
+    def test_cpu_reload_keeps_preview_but_navigation_shows_loading(self):
+        import numpy as np
+
+        self.controller.preview_load_requested.disconnect(self.controller.preview_load_worker.process)
+        self.controller._requested_file_path = "scan.arw"
+        self.controller.state.last_metrics["base_positive"] = np.ones((4, 4, 3), dtype=np.float32)
+        loading, decode, repaint = (MagicMock() for _ in range(3))
+        self.controller.loading_started.connect(loading)
+        self.controller.preview_load_requested.connect(decode)
+        self.controller.image_updated.connect(repaint)
+
+        for _ in range(2):
+            self.controller.load_file("scan.arw", preserve_zoom=True)
+            self.assertFalse(decode.call_args.args[0].use_splash)
+        loading.assert_not_called()
+        repaint.assert_not_called()
+
+        self.controller.load_file("next.arw", preserve_zoom=True)
+        loading.assert_called_once()
+        self.assertTrue(decode.call_args.args[0].use_splash)
+
     def test_preview_load_defers_neighbor_prefetch_until_render_finishes(self):
         self.controller._requested_file_path = "/tmp/a.dng"
         self.controller.request_render = MagicMock()
