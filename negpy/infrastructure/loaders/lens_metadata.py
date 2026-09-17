@@ -1,4 +1,7 @@
-"""Bounded readers for Sony ARW coefficients and DNG OpcodeList3."""
+"""Read embedded lens metadata through format-specific readers.
+
+Supported formats: Sony ARW and DNG WarpRectilinear.
+"""
 
 import os
 import struct
