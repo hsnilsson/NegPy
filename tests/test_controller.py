@@ -357,6 +357,41 @@ class TestAppController(unittest.TestCase):
         loading.assert_called_once()
         self.assertTrue(decode.call_args.args[0].use_splash)
 
+    def test_lens_toggle_repaints_live_cached_texture_before_decode(self):
+        from negpy.infrastructure.gpu.resources import GPUTexture
+
+        self.controller.preview_load_requested.disconnect(self.controller.preview_load_worker.process)
+        state = self.controller.state
+        state.current_file_path = "scan.arw"
+        state.current_file_hash = "scan"
+        state.uploaded_files = [{"path": "scan.arw", "hash": "scan"}]
+        self.controller._requested_file_path = state.current_file_path
+        cached, outgoing = MagicMock(spec=GPUTexture), MagicMock(spec=GPUTexture)
+        self.controller._render_memo.store("scan", "off", {"base_positive": cached})
+        state.last_metrics["base_positive"] = outgoing
+        self.controller._last_render_identity = ("scan", "on", None)
+        events = []
+        self.controller.image_updated.connect(lambda: events.append(("paint", state.last_metrics["base_positive"])))
+        self.controller.preview_load_requested.connect(lambda task: events.append(("decode", task.file_path)))
+
+        with patch.object(self.controller, "_render_memo_key", return_value="off"):
+            self.controller.load_file(state.current_file_path, preserve_zoom=True)
+
+        self.assertEqual(events, [("paint", cached), ("decode", "scan.arw")])
+        cached.destroy.assert_not_called()
+        outgoing.destroy.assert_not_called()
+        self.assertIs(self.controller._render_memo.get("scan", "on")["base_positive"], outgoing)
+
+        stale_metrics = {"source_hash": "scan", "memo_key": "on", "base_positive": outgoing}
+        metrics_available = MagicMock()
+        self.controller.metrics_available.connect(metrics_available)
+        self.controller._on_render_finished(outgoing, stale_metrics)
+        self.controller._on_metrics_updated(stale_metrics)
+
+        self.assertEqual(events, [("paint", cached), ("decode", "scan.arw")])
+        self.assertIs(state.last_metrics["base_positive"], cached)
+        metrics_available.assert_not_called()
+
     def test_preview_load_defers_neighbor_prefetch_until_render_finishes(self):
         self.controller._requested_file_path = "/tmp/a.dng"
         self.controller.request_render = MagicMock()
@@ -1020,6 +1055,19 @@ class TestAppController(unittest.TestCase):
         self.controller._on_preview_loaded("stale.dng", object(), (10, 20), "", None, "")
 
         self.assertIsNone(self.controller.state.preview_raw)
+        self.controller.request_render.assert_not_called()
+
+    def test_stale_lens_correction_decode_is_dropped(self):
+        self.controller.request_render = MagicMock()
+        self.controller._requested_file_path = "current.arw"
+        state = self.controller.state
+        state.config = replace(state.config, geometry=replace(state.config.geometry, lens_ca_from_metadata=True))
+        current_raw = object()
+        state.preview_raw = current_raw
+
+        self.controller._on_preview_loaded("current.arw", object(), (10, 20), "", None, "", (None, None, None, ""))
+
+        self.assertIs(state.preview_raw, current_raw)
         self.controller.request_render.assert_not_called()
 
     def test_apply_auto_crop_enables_auto_crop_and_clears_manual_rect(self):
