@@ -102,6 +102,28 @@ def test_prefetch_preflight_rejects_before_loader_decode() -> None:
     manager.load_linear_preview.assert_not_called()
 
 
+def test_prefetch_forwards_highlight_decode_identity() -> None:
+    manager = PreviewManager()
+    manager.load_linear_preview = MagicMock()
+
+    with (
+        patch("negpy.services.rendering.preview_manager.loader_factory.estimate_linear_preview_prefetch_memory", return_value=_estimate()),
+        patch("negpy.services.rendering.preview_manager.available_system_memory_bytes", return_value=4 * 1024**3),
+    ):
+        admitted = manager.prefetch_linear_preview(
+            "/slide.dng",
+            "Adobe RGB",
+            use_camera_wb=False,
+            file_hash="slide",
+            highlight_mode=5,
+            bake_camera_wb=True,
+        )
+
+    assert admitted
+    assert manager.load_linear_preview.call_args.kwargs["highlight_mode"] == 5
+    assert manager.load_linear_preview.call_args.kwargs["bake_camera_wb"] is True
+
+
 def test_prefetch_rejects_a_non_cancellable_loader_before_decode() -> None:
     manager = PreviewManager()
     manager.load_linear_preview = MagicMock()
