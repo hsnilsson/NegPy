@@ -105,6 +105,8 @@ class PreviewManager:
         should_cancel: Optional[Callable[[], bool]] = None,
         highlight_mode: int = 0,
         bake_camera_wb: bool = False,
+        lens_corrections: LensCorrections = LensCorrections(),
+        lens_flatfield: FlatFieldConfig = FlatFieldConfig(),
     ) -> bool:
         """Warm one preview when its cache and system-memory budgets both admit it."""
         if not file_hash:
@@ -115,6 +117,7 @@ class PreviewManager:
             workspace_color_space=color_space,
             full_resolution=False,
             demosaic=demosaic,
+            lens_token=lens_decode_token(lens_corrections, lens_flatfield),
             half=half_slice[0] if half_slice else 0,
             split_x=half_slice[1] if half_slice else 0.5,
             crop_rect=half_slice[2] if half_slice else None,
@@ -170,6 +173,8 @@ class PreviewManager:
             should_cancel=should_cancel,
             highlight_mode=highlight_mode,
             bake_camera_wb=bake_camera_wb,
+            lens_corrections=lens_corrections,
+            lens_flatfield=lens_flatfield,
         )
         return True
 

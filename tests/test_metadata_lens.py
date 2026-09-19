@@ -539,7 +539,7 @@ def test_positive_source_and_lens_mode_have_independent_preview_cache_entries(tm
     image = np.repeat(ramp[..., None], 3, axis=2)
     lens = LensMetadata("Sony", (SonyWarp((-1000,) * 16, (32768,) * 16, (-16384,) * 16),))
 
-    def get_loader(file_path, *, linear_raw=False, positive_source=False):
+    def get_loader(file_path, *, linear_raw=False, positive_source=False, preview_max_edge=None, should_cancel=None):
         pixels = image * (0.5 if positive_source else 1.0)
         return NonStandardFileWrapper(pixels), {"orientation": 1, "color_space": "Adobe RGB", "lens_correction": lens}
 
@@ -583,6 +583,7 @@ def test_preview_worker_forwards_positive_source_and_lens_settings(mode):
     result = (np.full((8, 12, 3), 0.5, np.float32), (8, 12), {})
     service.load_linear_preview.return_value = result
     service.load_splash_and_linear.return_value = (None, result)
+    service.prefetch_linear_preview.return_value = True
     task = PreviewLoadTask(
         file_path="source.arw",
         workspace_color_space="Adobe RGB",
@@ -597,7 +598,12 @@ def test_preview_worker_forwards_positive_source_and_lens_settings(mode):
     errors = []
     worker.error.connect(errors.append)
     worker.process(task)
-    call = service.load_splash_and_linear if mode == "splash" else service.load_linear_preview
+    if mode == "splash":
+        call = service.load_splash_and_linear
+    elif mode == "warm":
+        call = service.prefetch_linear_preview
+    else:
+        call = service.load_linear_preview
     assert call.call_count == 1
     assert call.call_args.kwargs["positive_source"] is True
     assert call.call_args.kwargs["lens_corrections"] == LensCorrections(True, True)

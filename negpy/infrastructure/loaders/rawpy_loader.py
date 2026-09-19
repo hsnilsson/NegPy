@@ -345,8 +345,8 @@ def _peek_linear_dng_rgb(file_path: str) -> Optional[Tuple[np.ndarray, Optional[
 
     if len(active_area) == 4:
         top, left, bottom, right = (int(v) for v in active_area)
-        if 0 <= top < bottom <= data.shape[0] and 0 <= left < right <= data.shape[1]:
-            data = data[top:bottom, left:right]
+        if 0 <= top < bottom <= arr.shape[0] and 0 <= left < right <= arr.shape[1]:
+            arr = arr[top:bottom, left:right]
 
     if len(crop_origin) >= 2 and len(crop_size) >= 2:
         ox, oy = int(round(crop_origin[0])), int(round(crop_origin[1]))
